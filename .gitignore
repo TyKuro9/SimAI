@@ -9,3 +9,4 @@ test/log/
 .cur*
 .DS_Store
 __pycache__/
+simulator_output/
