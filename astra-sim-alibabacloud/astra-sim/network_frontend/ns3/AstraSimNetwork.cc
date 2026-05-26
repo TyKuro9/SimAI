@@ -28,7 +28,10 @@
 #include <fstream>
 #include <iostream>
 #include <queue>
+#include <cstdlib>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -41,7 +44,7 @@
 #include <mpi.h>
 #endif
 
-#define RESULT_PATH "./ncclFlowModel_"
+#define DEFAULT_RESULT_PATH "./experiments/ns3_results/csv/"
 
 using namespace std;
 using namespace ns3;
@@ -84,7 +87,8 @@ public:
              << "\n";
       }
     }
-    exit(0);
+    // Gracefully stop NS3 so AstraSim can finish report/csv flushing.
+    Simulator::Stop();
     return 0;
   }
   double sim_time_resolution() { return 0; }
@@ -215,18 +219,36 @@ struct user_param {
   string workload;
   string network_topo;
   string network_conf;
+  string result_dir;
   user_param() {
     thread = 1;
     workload = "";
     network_topo = "";
     network_conf = "";
+    result_dir = DEFAULT_RESULT_PATH;
   };
   ~user_param(){};
 };
 
+static string NormalizeResultDir(string path) {
+  if (path.empty()) {
+    return DEFAULT_RESULT_PATH;
+  }
+  if (path.back() != '/') {
+    path.push_back('/');
+  }
+  return path;
+}
+
+static bool EnsureResultDir(const string& path) {
+  string command = "mkdir -p \"" + path + "\"";
+  int ret = system(command.c_str());
+  return ret == 0;
+}
+
 static int user_param_prase(int argc,char * argv[],struct user_param* user_param){
   int opt;
-  while ((opt = getopt(argc,argv,"ht:w:g:s:n:c:"))!=-1){
+  while ((opt = getopt(argc,argv,"ht:w:g:s:n:c:o:"))!=-1){
     switch (opt)
     {
     case 'h':
@@ -235,6 +257,7 @@ static int user_param_prase(int argc,char * argv[],struct user_param* user_param
       std::cout<<"-w    workloads default none "<<std::endl;
       std::cout<<"-n    network topo"<<std::endl;
       std::cout<<"-c    network_conf"<<std::endl;
+      std::cout<<"-o    result directory for EndToEnd.csv"<<std::endl;
       return 1;
       break;
     case 't':
@@ -248,6 +271,9 @@ static int user_param_prase(int argc,char * argv[],struct user_param* user_param
       break;
     case 'c':
       user_param->network_conf = optarg;
+      break;
+    case 'o':
+      user_param->result_dir = NormalizeResultDir(optarg);
       break;
     default:
       std::cerr<<"-h    help message"<<std::endl;
@@ -264,6 +290,11 @@ int main(int argc, char *argv[]) {
   NcclLog->writeLog(NcclLogLevel::INFO," init SimAI.log ");
   if(user_param_prase(argc,argv,&user_param)){
     return 0;
+  }
+  user_param.result_dir = NormalizeResultDir(user_param.result_dir);
+  if (!EnsureResultDir(user_param.result_dir)) {
+    std::cerr << "failed to create result directory: " << user_param.result_dir << std::endl;
+    return 1;
   }
   #ifdef NS3_MTP
   MtpInterface::Enable(user_param.thread);
@@ -307,7 +338,7 @@ int main(int argc, char *argv[]) {
         1,          
         1,
         0,                 
-        RESULT_PATH, 
+        user_param.result_dir, 
         "test1",            
         true,               
         false,               
@@ -324,8 +355,9 @@ int main(int argc, char *argv[]) {
   }
   std::cout << "simulator run " << std::endl;
 
-  Simulator::Run();
+  // Stop time must be configured before Run().
   Simulator::Stop(Seconds(2000000000));
+  Simulator::Run();
   Simulator::Destroy();
   
   #ifdef NS3_MPI
