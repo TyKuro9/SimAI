@@ -551,7 +551,7 @@ namespace MockNccl {
             curnodesendrank = rank_it->second[3];
           }
             int cur_rank = rank_it->first;
-            int partner_flow_id = task_list[rank_it->second[0]].flow_id;
+            int partner_flow_id = (rank_it->second[0] != -1) ? task_list[rank_it->second[0]].flow_id : -1;
             if (rank_it->second[3] == cur_rank &&
                 rank_it->second[2] != cur_rank && gp_info.nNodes > 1 &&
                 PXN_ENABLE) { 
@@ -1200,7 +1200,7 @@ namespace MockNccl {
             curnodesendrank = rank_it->second[3];
           }
             int cur_rank = rank_it->first;
-            int partner_flow_id = task_list[rank_it->second[0]].flow_id;
+            int partner_flow_id = (rank_it->second[0] != -1) ? task_list[rank_it->second[0]].flow_id : -1;
             if (rank_it->second[3] == cur_rank &&
                 rank_it->second[2] != cur_rank && gp_info.nNodes > 1 &&
                 PXN_ENABLE) { 
@@ -1306,7 +1306,7 @@ namespace MockNccl {
             curnodesendrank = rank_it->second[3];
           }
             int cur_rank = rank_it->first;
-            int partner_flow_id = task_list[rank_it->second[0]].flow_id;
+            int partner_flow_id = (rank_it->second[0] != -1) ? task_list[rank_it->second[0]].flow_id : -1;
             if (rank_it->second[3] == cur_rank &&
                 rank_it->second[2] != cur_rank && gp_info.nNodes > 1 &&
                 PXN_ENABLE) { 
@@ -1574,7 +1574,7 @@ namespace MockNccl {
             curnodesendrank = rank_it->second[3];
           }
             int cur_rank = rank_it->first;
-            int partner_flow_id = task_list[rank_it->second[0]].flow_id;
+            int partner_flow_id = (rank_it->second[0] != -1) ? task_list[rank_it->second[0]].flow_id : -1;
             if (rank_it->second[3] == cur_rank &&
                 rank_it->second[2] != cur_rank && gp_info.nNodes > 1 &&
                 PXN_ENABLE) { 
