@@ -552,6 +552,10 @@ namespace MockNccl {
           }
             int cur_rank = rank_it->first;
             int partner_flow_id = (rank_it->second[0] != -1) ? task_list[rank_it->second[0]].flow_id : -1;
+            if (partner_flow_id == -1) {
+              std::cerr << "[DEBUG][genReduceScatter] rank=" << rank
+                        << " ring_id=" << ring_id << " partner_flow_id=-1 data_size=" << data_size << std::endl;
+            }
             if (rank_it->second[3] == cur_rank &&
                 rank_it->second[2] != cur_rank && gp_info.nNodes > 1 &&
                 PXN_ENABLE) { 
@@ -571,7 +575,9 @@ namespace MockNccl {
                   chunkid,
                   chunkcount,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
               if(rank_it->first!=-1){
@@ -614,7 +620,9 @@ namespace MockNccl {
                   chunkid,
                   chunkcount,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id .push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               task_list2[rank_it->first] = tmp_result;
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
@@ -635,7 +643,9 @@ namespace MockNccl {
                   chunkid,
                   chunkcount,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               task_list2[rank_it->first] = tmp_result;
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
@@ -1201,6 +1211,10 @@ namespace MockNccl {
           }
             int cur_rank = rank_it->first;
             int partner_flow_id = (rank_it->second[0] != -1) ? task_list[rank_it->second[0]].flow_id : -1;
+            if (partner_flow_id == -1) {
+              std::cerr << "[DEBUG][genAllReduceRing] rank=" << rank
+                        << " ring_id=" << ring_id << " partner_flow_id=-1 data_size=" << data_size << std::endl;
+            }
             if (rank_it->second[3] == cur_rank &&
                 rank_it->second[2] != cur_rank && gp_info.nNodes > 1 &&
                 PXN_ENABLE) { 
@@ -1220,7 +1234,9 @@ namespace MockNccl {
                   chunk_id,
                   chunkcout,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
               prevranks.clear();
@@ -1260,7 +1276,9 @@ namespace MockNccl {
                   chunk_id,
                   chunkcout,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               task_list2[rank_it->first] = tmp_result;
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
@@ -1282,7 +1300,9 @@ namespace MockNccl {
                   chunk_id,
                   chunkcout,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               task_list2[rank_it->first] = tmp_result;
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
@@ -1326,7 +1346,9 @@ namespace MockNccl {
                   chunk_id,
                   chunkcout,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
               prevranks.clear();
@@ -1368,7 +1390,9 @@ namespace MockNccl {
                   chunk_id,
                   chunkcout,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               task_list2[rank_it->first] = tmp_result;
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
@@ -1389,7 +1413,9 @@ namespace MockNccl {
                   chunk_id,
                   chunkcout,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               task_list2[rank_it->first] = tmp_result;
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
@@ -1446,7 +1472,7 @@ namespace MockNccl {
     data_size = data_size / nranks / ringchannels.size();
     bool PXN_ENABLE = false;
     const char* PXN_ENV = std::getenv("AS_PXN_ENABLE");
-    if (PXN_ENV == "1") {
+    if (PXN_ENV && strcmp(PXN_ENV, "1") == 0) {
       PXN_ENABLE = true;
     } else {
       PXN_ENABLE = false;
@@ -1575,6 +1601,10 @@ namespace MockNccl {
           }
             int cur_rank = rank_it->first;
             int partner_flow_id = (rank_it->second[0] != -1) ? task_list[rank_it->second[0]].flow_id : -1;
+            if (partner_flow_id == -1) {
+              std::cerr << "[DEBUG][genAllGather] rank=" << rank
+                        << " ring_id=" << ring_id << " partner_flow_id=-1 data_size=" << data_size << std::endl;
+            }
             if (rank_it->second[3] == cur_rank &&
                 rank_it->second[2] != cur_rank && gp_info.nNodes > 1 &&
                 PXN_ENABLE) { 
@@ -1594,7 +1624,9 @@ namespace MockNccl {
                   chunkid,
                   chunkcount,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
               prevranks.clear();
@@ -1636,7 +1668,9 @@ namespace MockNccl {
                   chunkid,
                   chunkcount,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               task_list2[rank_it->first] = tmp_result;
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;
@@ -1657,7 +1691,9 @@ namespace MockNccl {
                   chunkid,
                   chunkcount,
                   "RING");
-              result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              if (partner_flow_id != -1) {
+                result[std::make_pair(ring_id, partner_flow_id)].child_flow_id.push_back(g_flow_id);
+              }
               task_list2[rank_it->first] = tmp_result;
               result[std::make_pair(ring_id, g_flow_id)] = tmp_result;
               g_flow_id++;

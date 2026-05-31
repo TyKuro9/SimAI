@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from collections import defaultdict
@@ -24,6 +25,57 @@ from typing import Dict, List, Optional, Set, Tuple
 # ---------------------------------------------------------------------------
 # 拓扑解析
 # ---------------------------------------------------------------------------
+
+def InferAswPswIds(
+    gpu_count: int,
+    other_switch_count: int,
+    switch_ids: List[int],
+    nv_switch_count: int,
+    adj: Dict[int, Set[int]],
+) -> Tuple[Set[int], Set[int], Optional[str]]:
+    """
+    推断 ASW / PSW 节点集合。
+
+    默认（Meta/HPN/ROFT 等）：ASW = 与 GPU 直连的 non-NV 交换机，PSW = 其余。
+    Zcube(k=2)：ASW、PSW 均直连 GPU；按生成器顺序 other_switch 前 n 台为 ASW、后 n 台为 PSW，
+    并用 seg/rail 连线模式校验。
+    """
+    other_ordered = switch_ids[nv_switch_count : nv_switch_count + other_switch_count]
+    other_ids = set(other_ordered)
+
+    n = math.isqrt(gpu_count)
+    if n * n == gpu_count and other_switch_count == 2 * n and len(other_ordered) == 2 * n:
+        asw_ids = set(other_ordered[:n])
+        psw_ids = set(other_ordered[n : 2 * n])
+        if _ValidateZcubeK2Roles(n, gpu_count, asw_ids, psw_ids, adj):
+            return asw_ids, psw_ids, "Zcube_k2"
+
+    asw_ids: Set[int] = set()
+    for sid in other_ids:
+        if any(node < gpu_count for node in adj[sid]):
+            asw_ids.add(sid)
+    psw_ids = other_ids - asw_ids
+    return asw_ids, psw_ids, None
+
+
+def _ValidateZcubeK2Roles(
+    n: int,
+    gpu_count: int,
+    asw_ids: Set[int],
+    psw_ids: Set[int],
+    adj: Dict[int, Set[int]],
+) -> bool:
+    """Zcube(k=2)：ASW[seg] 只连同一 segment 的 GPU；PSW[rail] 只连同一 rail 的 GPU。"""
+    for asw in asw_ids:
+        gpu_nbrs = [node for node in adj[asw] if node < gpu_count]
+        if not gpu_nbrs or len({g // n for g in gpu_nbrs}) != 1:
+            return False
+    for psw in psw_ids:
+        gpu_nbrs = [node for node in adj[psw] if node < gpu_count]
+        if not gpu_nbrs or len({g % n for g in gpu_nbrs}) != 1:
+            return False
+    return True
+
 
 def ParseTopo(topo_path: str):
     with open(topo_path) as f:
@@ -38,7 +90,6 @@ def ParseTopo(topo_path: str):
 
     gpu_count = switch_ids[0] if switch_ids else 0
     nv_ids = set(switch_ids[:nv_switch_count])
-    other_ids = set(switch_ids[nv_switch_count:])
 
     adj: Dict[int, Set[int]] = defaultdict(set)
     with open(topo_path) as f:
@@ -52,12 +103,9 @@ def ParseTopo(topo_path: str):
             adj[u].add(v)
             adj[v].add(u)
 
-    # ASW：与 GPU 相连的 non-NV 交换机；PSW：不与 GPU 直连的交换机
-    asw_ids: Set[int] = set()
-    for sid in other_ids:
-        if any(n < gpu_count for n in adj[sid]):
-            asw_ids.add(sid)
-    psw_ids = other_ids - asw_ids
+    asw_ids, psw_ids, topo_kind = InferAswPswIds(
+        gpu_count, other_switch_count, switch_ids, nv_switch_count, adj
+    )
 
     return {
         "gpu_count": gpu_count,
@@ -67,6 +115,7 @@ def ParseTopo(topo_path: str):
         "psw_ids": psw_ids,
         "adj": adj,
         "total_nodes": total_nodes,
+        "topo_kind": topo_kind,
     }
 
 
@@ -386,6 +435,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--jobs", nargs="*", help="只跑指定 job 名（子串匹配）")
     parser.add_argument("--pair-cache", default="scripts/.fct_path_pair_cache")
+    parser.add_argument(
+        "--rebuild-cache",
+        action="store_true",
+        help="忽略已有 pairclass 缓存并重新生成",
+    )
     args = parser.parse_args()
 
     selected = JOBS
@@ -407,11 +461,13 @@ def main():
 
         print(f"\n>>> 处理 {name}")
         topo = ParseTopo(topo_path)
+        if topo.get("topo_kind"):
+            print(f"  拓扑类型: {topo['topo_kind']}")
         cache_file = os.path.join(
             args.pair_cache,
             os.path.basename(topo_rel) + ("_pxn" if pxn else "_nopxn") + ".pairclass",
         )
-        if os.path.isfile(cache_file):
+        if os.path.isfile(cache_file) and not args.rebuild_cache:
             print(f"  加载 GPU 对分类缓存: {cache_file}")
             pair_class = {}
             with open(cache_file) as cf:
