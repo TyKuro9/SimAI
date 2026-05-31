@@ -1,6 +1,15 @@
 
 >>> 处理 Meta256
-  加载 GPU 对分类缓存: scripts/.fct_path_pair_cache/Meta_Topo_256g_8gps_400Gbps_A100_nopxn.pairclass
+  构建路由表...
+    GPU 对进度 0/256
+    GPU 对进度 32/256
+    GPU 对进度 64/256
+    GPU 对进度 96/256
+    GPU 对进度 128/256
+    GPU 对进度 160/256
+    GPU 对进度 192/256
+    GPU 对进度 224/256
+  已写入缓存: scripts/.fct_path_pair_cache/Meta_Topo_256g_8gps_400Gbps_A100_nopxn.pairclass
   扫描 FCT: /home/zty/Topo/SimAI_TyKuro9/simulation_output/meta256/meta256_fct.txt
 
 ========================================================================
@@ -18,7 +27,16 @@ ASW_PSW                         736    0.00%        46883930112       63700992
   ASW_PSW: 63700992B×736
 
 >>> 处理 Meta256 (meta_fct2)
-  加载 GPU 对分类缓存: scripts/.fct_path_pair_cache/Meta_Topo_256g_8gps_400Gbps_A100_nopxn.pairclass
+  构建路由表...
+    GPU 对进度 0/256
+    GPU 对进度 32/256
+    GPU 对进度 64/256
+    GPU 对进度 96/256
+    GPU 对进度 128/256
+    GPU 对进度 160/256
+    GPU 对进度 192/256
+    GPU 对进度 224/256
+  已写入缓存: scripts/.fct_path_pair_cache/Meta_Topo_256g_8gps_400Gbps_A100_nopxn.pairclass
   扫描 FCT: /home/zty/Topo/SimAI_TyKuro9/simulation_output/meta256/meta_fct2.txt
 
 ========================================================================
@@ -95,6 +113,7 @@ ASW_ONLY                       1328    0.00%        84594917376       63700992
   ASW_ONLY: 63700992B×1328
 
 >>> 处理 Zcube256
+  拓扑类型: Zcube_k2
   构建路由表...
     GPU 对进度 0/256
     GPU 对进度 32/256
@@ -109,20 +128,31 @@ ASW_ONLY                       1328    0.00%        84594917376       63700992
 
 ========================================================================
 拓扑/场景: Zcube256
-  GPU=256, NVSW=32, ASW=32, PSW=0
+  GPU=256, NVSW=32, ASW=16, PSW=16
 ========================================================================
 路径类型                             流数       占比        m_size总和(B)    平均m_size(B)
 ------------------------------------------------------------------------
 NVSW_ONLY                  34010242  100.00%     13693999972352         402643
-ASW_ONLY                       1064    0.00%        67777855488       63700992
+ASW_ONLY                        536    0.00%        34143731712       63700992
+ASW_PSW                         528    0.00%        33634123776       63700992
 合计                         34011306  100.00%
 
 主要 m_size 分布 (按流数 Top5 消息大小):
   NVSW_ONLY: 393216B×33809538, 64B×100352, 128B×75264, 15925248B×25088
-  ASW_ONLY: 63700992B×1064
+  ASW_ONLY: 63700992B×536
+  ASW_PSW: 63700992B×528
 
 >>> 处理 RO256 (PXN=1)
-  加载 GPU 对分类缓存: scripts/.fct_path_pair_cache/ROFT_256g_8gps_p64a0.5_400Gbps_H100_pxn.pairclass
+  构建路由表...
+    GPU 对进度 0/256
+    GPU 对进度 32/256
+    GPU 对进度 64/256
+    GPU 对进度 96/256
+    GPU 对进度 128/256
+    GPU 对进度 160/256
+    GPU 对进度 192/256
+    GPU 对进度 224/256
+  已写入缓存: scripts/.fct_path_pair_cache/ROFT_256g_8gps_p64a0.5_400Gbps_H100_pxn.pairclass
   扫描 FCT: /home/zty/Topo/SimAI_TyKuro9/simulation_output/RO256/RO256_fct.txt
 
 ========================================================================
@@ -138,7 +168,16 @@ NVSW_ONLY                     37485  100.00%        14739701760         393216
   NVSW_ONLY: 393216B×37485
 
 >>> 处理 ROFT256 (PXN=1)
-  加载 GPU 对分类缓存: scripts/.fct_path_pair_cache/ROFT_256g_8gps_p64a0.5_400Gbps_H100_pxn.pairclass
+  构建路由表...
+    GPU 对进度 0/256
+    GPU 对进度 32/256
+    GPU 对进度 64/256
+    GPU 对进度 96/256
+    GPU 对进度 128/256
+    GPU 对进度 160/256
+    GPU 对进度 192/256
+    GPU 对进度 224/256
+  已写入缓存: scripts/.fct_path_pair_cache/ROFT_256g_8gps_p64a0.5_400Gbps_H100_pxn.pairclass
   扫描 FCT: /home/zty/Topo/SimAI_TyKuro9/simulation_output/ROFT256/ROFT256_fct.txt
 
 ========================================================================
