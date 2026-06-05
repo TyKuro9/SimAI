@@ -427,6 +427,85 @@ JOBS = [
     ),
 ]
 
+# Mixtral 8x7B MoE (ep=8, flowsim FCT)
+MOE_JOBS = [
+    (
+        "Meta256MoE",
+        "experiments/flowsim_results/256/MetaMoE/fct.txt",
+        "mytopo/Meta_Topo_256g_8gps_400Gbps_A100",
+        False,
+    ),
+    (
+        "DeepSeek256MoE",
+        "experiments/flowsim_results/256/DeepSeekMoE/fct.txt",
+        "mytopo/DeepSeek_256g_8gps_p16a0.5_400Gbps_H800",
+        False,
+    ),
+    (
+        "HPN256MoE",
+        "experiments/flowsim_results/256/HPNMoE/fct.txt",
+        "mytopo/AlibabaHPN_256g_8gps_DualToR_DualPlane_200Gbps_H100",
+        False,
+    ),
+    (
+        "Zcube256MoE",
+        "experiments/flowsim_results/256/ZcubeMoE/fct.txt",
+        "mytopo/Zcube_n16_k2_256g_8gps_200Gbps_H100",
+        False,
+    ),
+    (
+        "RO256MoE (PXN=1)",
+        "experiments/flowsim_results/256/ROMoE/fct.txt",
+        "mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100",
+        True,
+    ),
+    (
+        "ROFT256MoE (PXN=1)",
+        "experiments/flowsim_results/256/ROFTMoE/fct.txt",
+        "mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100",
+        True,
+    ),
+]
+
+# MoE 与 Dense 典型 m_size 语义（便于报告对比）
+MOE_MSIZE_LABELS = {
+    64: "ctrl/sync(64B)",
+    128: "ctrl/sync(128B)",
+    262144: "MoE/TP chunk(256KB)",
+    524288: "MoE/TP chunk(512KB)",
+    393216: "Dense TP chunk(384KB)",
+    4194304: "ALLTOALL_EP(4MB)",
+    33554432: "MoE EP AG/RS(32MB)",
+    15925248: "PP comm(~15MB)",
+    63700992: "PP comm(~61MB)",
+}
+DENSE_MSIZE_LABELS = MOE_MSIZE_LABELS
+
+
+def LabelMsize(m_size: int, dense: bool = False) -> str:
+    labels = DENSE_MSIZE_LABELS if dense else MOE_MSIZE_LABELS
+    return labels.get(m_size, f"other({m_size}B)")
+
+
+def PrintMoeVsDenseMsizeSummary(
+    stats: Dict[str, PathStats], dense: bool = False, top_n: int = 10
+):
+    """汇总全局 m_size 分布（跨路径类型）。"""
+    global_sizes: Dict[int, int] = defaultdict(int)
+    for key, s in stats.items():
+        if key.startswith("_meta"):
+            continue
+        for sz, cnt in s.m_sizes.items():
+            global_sizes[sz] += cnt
+    total = sum(global_sizes.values())
+    if not total:
+        return
+    print(f"\n全局 m_size 分布 (Top{top_n}, 合计 {total} 流):")
+    for sz, cnt in sorted(global_sizes.items(), key=lambda x: -x[1])[:top_n]:
+        pct = 100.0 * cnt / total
+        label = LabelMsize(sz, dense)
+        print(f"  {sz:>12} B  {label:<28} {cnt:>12} ({pct:5.2f}%)")
+
 
 def main():
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -434,6 +513,16 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--jobs", nargs="*", help="只跑指定 job 名（子串匹配）")
+    parser.add_argument(
+        "--moe",
+        action="store_true",
+        help="分析 Mixtral MoE flowsim FCT（experiments/flowsim_results/256/*MoE）",
+    )
+    parser.add_argument(
+        "--report",
+        metavar="FILE",
+        help="将 stdout 同时写入报告文件",
+    )
     parser.add_argument("--pair-cache", default="scripts/.fct_path_pair_cache")
     parser.add_argument(
         "--rebuild-cache",
@@ -442,12 +531,38 @@ def main():
     )
     args = parser.parse_args()
 
-    selected = JOBS
+    job_pool = MOE_JOBS if args.moe else JOBS
+    selected = job_pool
     if args.jobs:
         keys = args.jobs
-        selected = [j for j in JOBS if any(k in j[0] for k in keys)]
+        selected = [j for j in job_pool if any(k in j[0] for k in keys)]
 
     os.makedirs(args.pair_cache, exist_ok=True)
+
+    report_fp = open(args.report, "w") if args.report else None
+
+    class Tee:
+        def __init__(self, *streams):
+            self.streams = streams
+
+        def write(self, data):
+            for s in self.streams:
+                s.write(data)
+
+        def flush(self):
+            for s in self.streams:
+                s.flush()
+
+    orig_stdout = sys.stdout
+    if report_fp:
+        sys.stdout = Tee(orig_stdout, report_fp)
+
+    if args.moe and not args.jobs:
+        print(
+            ">>> Mixtral 8x7B MoE (256 GPU, ep=8, tp=8, pp=2) FCT 路径分析\n"
+            "    与 Dense 模型相比，MoE 引入 ALLTOALL_EP / EP 组通信，"
+            "m_size 以 256KB/512KB 块为主，流总数约减半。\n"
+        )
 
     for name, fct_rel, topo_rel, pxn in selected:
         fct_path = os.path.join(base, fct_rel)
@@ -484,6 +599,12 @@ def main():
         print(f"  扫描 FCT: {fct_path}")
         stats = AnalyzeFct(fct_path, topo, pair_class, pxn)
         PrintReport(name, stats, topo)
+        PrintMoeVsDenseMsizeSummary(stats, dense=not args.moe)
+
+    if report_fp:
+        sys.stdout = orig_stdout
+        report_fp.close()
+        print(f"\n报告已写入: {args.report}")
 
 
 if __name__ == "__main__":

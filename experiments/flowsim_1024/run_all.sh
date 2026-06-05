@@ -40,11 +40,11 @@ RunOne() {
 }
 
 ALL_CASES=(
-  "Meta|Meta_Topo_1024g_8gps_400Gbps_H100|Meta|Update-1024gpu_175B_MetaH100_flowsim.log"
-  "HPN|AlibabaHPN_1024g_8gps_DualToR_DualPlane_200Gbps_H100|HPN|Update-1024gpu_175B_HPN1024H100_flowsim.log"
-  "DeepSeek|DeepSeek_1024g_8gps_p16a0.5_400Gbps_H100|DeepSeek|Update-1024gpu_175B_DeepSeek1024H100_flowsim.log"
-  "RO|RailOnly_1024g_8gps_p64a0.5_400Gbps_H100|RO|Update-1024gpu_175B_RO1024H100_flowsim.log"
-  "ROFT|ROFT_1024g_8gps_p64a0.5_400Gbps_H100|ROFT|Update-1024gpu_175B_ROFT1024H100_flowsim.log"
+  # "Meta|Meta_Topo_1024g_8gps_400Gbps_H100|Meta|Update-1024gpu_175B_MetaH100_flowsim.log"
+  # "HPN|AlibabaHPN_1024g_8gps_DualToR_DualPlane_200Gbps_H100|HPN|Update-1024gpu_175B_HPN1024H100_flowsim.log"
+  # "DeepSeek|DeepSeek_1024g_8gps_p16a0.5_400Gbps_H100|DeepSeek|Update-1024gpu_175B_DeepSeek1024H100_flowsim.log"
+  # "RO|RailOnly_1024g_8gps_p64a0.5_400Gbps_H100|RO|Update-1024gpu_175B_RO1024H100_flowsim.log"
+  # "ROFT|ROFT_1024g_8gps_p64a0.5_400Gbps_H100|ROFT|Update-1024gpu_175B_ROFT1024H100_flowsim.log"
   "Zcube|Zcube_n32_k2_1024g_8gps_200Gbps_H100|Zcube|Update-1024gpu_175B_Zcube1024H100_flowsim.log"
 )
 
