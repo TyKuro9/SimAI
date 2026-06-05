@@ -566,12 +566,8 @@ def GenerateROFTTopo(
             f"PSW 下联容量 psw_port*beta（={dnl_cap_i}）须 >= ASW 台数 {asw_count}"
         )
 
-    max_segments_per_pod = psw_count // g
-    if segment_num > max_segments_per_pod:
-        raise ValueError(
-            f"segment_num（={segment_num}）须 <= asw_port*(1-alpha)/gpus_per_server"
-            f"（={max_segments_per_pod}），否则 Rail Single-ToR 下单 Pod 内 PSW 下联 ASW 组数不足"
-        )
+    # 旧版 Rail Single-ToR 约束：每 rank 一台 PSW，单 Pod 最多 psw_count/g 个 segment。
+    # ROFT 采用 ASW–PSW 全连接；多 segment 时以 psw_port*beta >= asw_count 为准（见上）。
 
     filename = (
         f"ROFT_{gpu_count}g_{g}gps_p{asw_port}a{alpha}_{nic_bw}_{gpu_type}{name_suffix}"
@@ -759,7 +755,7 @@ def GenerateHPNTopo(
     gpus_per_server=8,
     nv_switch_per_server=1,
     gpu_type="H100",
-    switch_throughput=12800,  # Gbps
+    switch_throughput=6400,  # Gbps → 16 down @200G + 8 up @400G (alpha=0.5)
     alpha=0.5,
     nvlink_bw="3600Gbps",
     nic_bw="200Gbps",
@@ -767,61 +763,47 @@ def GenerateHPNTopo(
     nv_latency="0.000025ms",
     latency="0.0005ms",
     error_rate="0",
-    dual_plane=True,  # 是否为双平面（16个ASW），False则为单平面（8个ASW）
+    dual_plane=True,  # 是否为双平面（每组16个ASW），False则为单平面（每组8个ASW）
 ):
     """
     生成阿里巴巴 HPN (High Performance Network) 风格拓扑。
-    
+
     拓扑特点
     --------
-    - 固定16个ASW（双平面模式）或8个ASW（单平面模式）
-    - 双平面模式：Plane 0 有8个ASW (0-7)，Plane 1 有8个ASW (8-15)
-    - 每个server内的8个GPU根据其rank（0-7）连接到对应的ASW对
-    - GPU rank i 连接到 ASW i (Plane 0) 和 ASW (i+8) (Plane 1)
-    - 每个GPU到ASW的NIC带宽为200Gbps
-    - ASW到PSW的带宽为400Gbps
-    
-    参数说明
-    --------
-    gpu_count : int
-        GPU总数，默认256
-    gpus_per_server : int
-        每个server的GPU数，默认8（必须为8以匹配16个ASW）
-    switch_throughput : float
-        ASW交换机吞吐量（单位Gbps），默认6400Gbps
-    alpha : float
-        ASW下联端口比例，默认0.5
-    nic_bw : str
-        GPU到ASW的NIC带宽，默认"200Gbps"
-    asw_to_psw_bw : str
-        ASW到PSW的上联带宽，默认"400Gbps"
-    dual_plane : bool
-        是否为双平面模式，默认True
-        
+    - 每组 ASW 覆盖 downlink_ports 台 server（默认 16 口 × 200Gbps → 128 GPU）
+    - 双平面：每组 16 台 ASW（Plane0: rank 0–7，Plane1: rank 8–15）
+    - GPU rank i 连到组内 ASW i（Plane0）与 ASW i+8（Plane1）
+    - 当 server 数超过单组下联容量时，自动增加 ASW 组；各组 ASW 经 PSW 全互联（跨组流量走 PSW）
+    - GPU–ASW：200Gbps；ASW–PSW：400Gbps
+
+    256 GPU 示例（downlink_ports=16）
+    ---------------------------
+    - 2 组 × 16 ASW = 32 ASW；16 PSW（每 Plane 8 台）
+    - 组0：server 0–15  → ASW 0–15
+    - 组1：server 16–31 → ASW 16–31
+    - Plane0 全部 16 台 ASW ↔ Plane0 的 8 台 PSW；Plane1 同理
+
     端口计算
     --------
-    - ASW下联端口数 = (switch_throughput × alpha) / nic_bw数值
-    - ASW上联端口数 = (switch_throughput × (1-alpha)) / asw_to_psw_bw数值
-    - 每个Plane的PSW数量 = ASW上联端口数
-    - 双平面总PSW数 = 上联端口数 × 2
+    - ASW 下联端口数 = (switch_throughput × alpha) / nic_bw
+    - ASW 上联端口数 = (switch_throughput × (1-alpha)) / asw_to_psw_bw
+    - 每 Plane PSW 数 = ASW 上联端口数；双平面总 PSW = 上联端口数 × 2
     """
     print(f"开始生成 HPN 拓扑，GPU数量: {gpu_count}...")
-    
+
     if gpus_per_server != 8:
-        raise ValueError("HPN 拓扑要求 gpus_per_server = 8（匹配16个ASW的DualToR设计）")
-    
+        raise ValueError("HPN 拓扑要求 gpus_per_server = 8（匹配 DualToR 的 8 rank ASW 设计）")
+
     num_servers = gpu_count // gpus_per_server
     if num_servers * gpus_per_server != gpu_count:
         raise ValueError(f"gpu_count（={gpu_count}）须为 gpus_per_server（={gpus_per_server}）的整数倍")
-    
-    # 提取带宽数值（假设格式为 "XXXGbps"）
+
     nic_bw_value = float(nic_bw.replace("Gbps", "").replace("gbps", ""))
     asw_psw_bw_value = float(asw_to_psw_bw.replace("Gbps", "").replace("gbps", ""))
-    
-    # 计算端口数
+
     downlink_ports_f = (switch_throughput * alpha) / nic_bw_value
     uplink_ports_f = (switch_throughput * (1.0 - alpha)) / asw_psw_bw_value
-    
+
     if abs(downlink_ports_f - round(downlink_ports_f)) > 1e-6:
         raise ValueError(
             f"ASW 下联端口数 (switch_throughput×alpha / nic_bw) = {downlink_ports_f} 须为整数"
@@ -830,96 +812,97 @@ def GenerateHPNTopo(
         raise ValueError(
             f"ASW 上联端口数 (switch_throughput×(1-alpha) / asw_to_psw_bw) = {uplink_ports_f} 须为整数"
         )
-    
+
     downlink_ports = int(round(downlink_ports_f))
     uplink_ports = int(round(uplink_ports_f))
-    
-    # ASW 和 PSW 数量
+    servers_per_group = downlink_ports
+
+    if num_servers % servers_per_group != 0:
+        raise ValueError(
+            f"服务器数（={num_servers}）须为 ASW 单组下联容量（={servers_per_group} 台 server）的整数倍"
+        )
+    num_groups = num_servers // servers_per_group
+
     if dual_plane:
-        asw_count = 16  # 固定16个ASW，两个Plane各8个
-        psw_per_plane = uplink_ports
-        psw_count = psw_per_plane * 2  # 两个Plane
+        asw_per_group = 16
         mode_str = "DualToR_DualPlane"
     else:
-        asw_count = 8   # 单平面只有8个ASW
-        psw_per_plane = uplink_ports
-        psw_count = psw_per_plane
+        asw_per_group = 8
         mode_str = "DualToR_SinglePlane"
-    
-    # 检查下联端口容量
-    gpus_per_asw = num_servers  # 每个ASW连接所有server的对应rank GPU
-    if gpus_per_asw > downlink_ports:
-        raise ValueError(
-            f"ASW 下联端口数（={downlink_ports}）不足以连接 {gpus_per_asw} 个GPU。"
-            f"需增大 switch_throughput 或 alpha，或减小 GPU 数量"
-        )
-    
+
+    asw_count = asw_per_group * num_groups
+    psw_per_plane = uplink_ports
+    psw_count = psw_per_plane * (2 if dual_plane else 1)
+    gpus_per_asw = servers_per_group
+
     filename = f"AlibabaHPN_{gpu_count}g_{gpus_per_server}gps_{mode_str}_{nic_bw}_{gpu_type}"
     topo = TopoGenerator(filename)
-    
+
     topo.SetConfig(
         gpu_count=gpu_count,
         gpus_per_server=gpus_per_server,
         nv_switch_per_server=nv_switch_per_server,
         gpu_type=gpu_type,
     )
-    
+
     print(f"  服务器数: {num_servers}")
     print(f"  交换机吞吐量: {switch_throughput}Gbps, alpha: {alpha}")
-    print(f"  ASW 下联端口数: {downlink_ports} (每个ASW连接{gpus_per_asw}个GPU)")
+    print(f"  ASW 下联端口数: {downlink_ports} (每组 {gpus_per_asw} 台 server / ASW rank)")
     print(f"  ASW 上联端口数: {uplink_ports}")
-    print(f"  ASW 数量: {asw_count}")
+    print(f"  ASW 组数: {num_groups} × {asw_per_group} 台 = {asw_count} 台 ASW")
     print(f"  PSW 数量: {psw_count} ({'每个Plane ' + str(psw_per_plane) if dual_plane else '单Plane'})")
-    
-    # 添加交换机
+
     topo.AddNVSwitches()
     asw_ids = topo.AddASWSwitches(asw_count)
     psw_ids = topo.AddPSWSwitches(psw_count)
-    
-    # 连接 GPU 到 NVSwitch
+
     topo.ConnectGPUsToNVSwitch(nvlink_bw=nvlink_bw, nv_latency=nv_latency)
-    
-    # 连接 GPU 到 ASW
-    # 每个GPU根据其在server内的rank连接到对应的ASW
+
     for gpu_id in range(gpu_count):
-        rank = gpu_id % gpus_per_server  # GPU在server内的rank (0-7)
-        
+        rank = gpu_id % gpus_per_server
+        server_id = gpu_id // gpus_per_server
+        group_id = server_id // servers_per_group
+        asw_base = group_id * asw_per_group
+
         if dual_plane:
-            # DualPlane: rank对应ASW为 rank 和 rank+8
-            asw_plane0 = asw_ids[rank]
-            asw_plane1 = asw_ids[rank + 8]
+            asw_plane0 = asw_ids[asw_base + rank]
+            asw_plane1 = asw_ids[asw_base + rank + 8]
             topo.AddLink(gpu_id, asw_plane0, nic_bw, latency, str(error_rate))
             topo.AddLink(gpu_id, asw_plane1, nic_bw, latency, str(error_rate))
         else:
-            # SinglePlane: rank只对应一个ASW
-            asw_id = asw_ids[rank]
-            topo.AddLink(gpu_id, asw_id, nic_bw, latency, str(error_rate))
-    
-    # 连接 ASW 到 PSW
+            topo.AddLink(gpu_id, asw_ids[asw_base + rank], nic_bw, latency, str(error_rate))
+
     if dual_plane:
-        # Plane 0: ASW 0-7 全连接到前 psw_per_plane 个PSW
-        plane0_asw = asw_ids[0:8]
+        plane0_asw = []
+        plane1_asw = []
+        for group_id in range(num_groups):
+            base = group_id * asw_per_group
+            plane0_asw.extend(asw_ids[base : base + 8])
+            plane1_asw.extend(asw_ids[base + 8 : base + 16])
+
         plane0_psw = psw_ids[0:psw_per_plane]
+        plane1_psw = psw_ids[psw_per_plane:psw_count]
         for asw_id in plane0_asw:
             for psw_id in plane0_psw:
                 topo.AddLink(asw_id, psw_id, asw_to_psw_bw, latency, str(error_rate))
-        
-        # Plane 1: ASW 8-15 全连接到后 psw_per_plane 个PSW
-        plane1_asw = asw_ids[8:16]
-        plane1_psw = psw_ids[psw_per_plane:psw_count]
         for asw_id in plane1_asw:
             for psw_id in plane1_psw:
                 topo.AddLink(asw_id, psw_id, asw_to_psw_bw, latency, str(error_rate))
-        
-        print(f"  Plane 0: {len(plane0_asw)} ASW × {len(plane0_psw)} PSW = {len(plane0_asw) * len(plane0_psw)} 条链路")
-        print(f"  Plane 1: {len(plane1_asw)} ASW × {len(plane1_psw)} PSW = {len(plane1_asw) * len(plane1_psw)} 条链路")
+
+        print(
+            f"  Plane 0: {len(plane0_asw)} ASW × {len(plane0_psw)} PSW = "
+            f"{len(plane0_asw) * len(plane0_psw)} 条链路（{num_groups} 组 ASW 经 PSW 互联）"
+        )
+        print(
+            f"  Plane 1: {len(plane1_asw)} ASW × {len(plane1_psw)} PSW = "
+            f"{len(plane1_asw) * len(plane1_psw)} 条链路"
+        )
     else:
-        # SinglePlane: 所有ASW全连接到所有PSW
         for asw_id in asw_ids:
             for psw_id in psw_ids:
                 topo.AddLink(asw_id, psw_id, asw_to_psw_bw, latency, str(error_rate))
         print(f"  SinglePlane: {len(asw_ids)} ASW × {len(psw_ids)} PSW = {len(asw_ids) * len(psw_ids)} 条链路")
-    
+
     topo.Generate()
     print(f"HPN 拓扑已生成: {filename}")
     return filename

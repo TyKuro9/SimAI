@@ -410,19 +410,19 @@ JOBS = [
     (
         "RO256 (PXN=1)",
         "simulation_output/RO256/RO256_fct.txt",
-        "mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100",
+        "mytopo/RailOnly_256g_8gps_p16a0.5_400Gbps_H100",
         True,
     ),
     (
         "ROFT256 (PXN=1)",
         "simulation_output/ROFT256/ROFT256_fct.txt",
-        "mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100",
+        "mytopo/ROFT_256g_8gps_p16a0.5_400Gbps_H100",
         True,
     ),
     (
         "ROFT256 woPXN",
         "simulation_output/ROFT256/ROFTwoPXN256_fct.txt",
-        "mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100",
+        "mytopo/ROFT_256g_8gps_p16a0.5_400Gbps_H100",
         False,
     ),
 ]

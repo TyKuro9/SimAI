@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Mixtral 8x7B MoE @ 256 GPU — NS3 全拓扑批量运行
-# 用法: cd /home/zty/Topo/SimAI_TyKuro9 && bash run_mixtral_256moe_ns3.sh [topo名...]
+# 用法: cd /public/home/gulj2023/Topo/SimAI_TyKuro9 && bash run_mixtral_256moe_ns3.sh [topo名...]
 #   无参数则跑全部；例如: bash run_mixtral_256moe_ns3.sh HPN Meta DeepSeek
 
 set -euo pipefail
@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 
 NS3_CSV_BASE="./experiments/ns3_results/csv"
 LOG_DIR="./experiments/ns3_results"
-mkdir -p "${NS3_CSV_BASE}" "${LOG_DIR}" /home/zty/Topo/SimAI/simulation_output/meta256
+# mkdir -p "${NS3_CSV_BASE}" "${LOG_DIR}" ./simulation_output/meta256
 
 # workload 文件名含 * 与空格，必须单引号
 WL='./my_workloads/H100-Mixtral_8*7B-world_size256-tp8-pp2-ep8-gbs256-mbs1-seq2048-MOE-True-GEMM-True-flash_attn-True copy.txt'
@@ -25,8 +25,8 @@ run_one() {
 }
 
 run_HPN() {
-  run_one "HPN256" sudo env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
-    "${SIM}" -t 32 -w "${WL}" \
+  run_one "HPN256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
+    "${SIM}" -t 1 -w "${WL}" \
     -n ./mytopo/AlibabaHPN_256g_8gps_DualToR_DualPlane_200Gbps_H100 \
     -c ./myconfig/HPN256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-HPN256H100/" \
@@ -34,8 +34,8 @@ run_HPN() {
 }
 
 run_Meta() {
-  run_one "Meta256" sudo env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
-    "${SIM}" -t 16 -w "${WL}" \
+  run_one "Meta256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
+    "${SIM}" -t 1 -w "${WL}" \
     -n ./mytopo/Meta_Topo_256g_8gps_400Gbps_A100 \
     -c ./myconfig/Meta256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-Meta256A100/" \
@@ -43,16 +43,16 @@ run_Meta() {
 }
 
 run_MetaFast() {
-  run_one "Meta-fast256" sudo env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
-    "${FAST_SIM}" -t 16 -w "${WL}" \
+  run_one "Meta-fast256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
+    "${FAST_SIM}" -t 1 -w "${WL}" \
     -n ./mytopo/Meta_Topo_256g_8gps_400Gbps_A100 \
     -c ./myconfig/Meta-fast256MoE.conf \
     2>&1 | tee "${LOG_DIR}/Update-256gpu_Mixtral8x7B-MoE_Meta-fast256A100_copy_ns3.log"
 }
 
 run_DeepSeek() {
-  run_one "DeepSeek256" sudo env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
-    "${SIM}" -t 16 -w "${WL}" \
+  run_one "DeepSeek256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
+    "${SIM}" -t 1 -w "${WL}" \
     -n ./mytopo/DeepSeek_256g_8gps_p16a0.5_400Gbps_H800 \
     -c ./myconfig/DeepSeek256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-DeepSeek256H800/" \
@@ -60,8 +60,8 @@ run_DeepSeek() {
 }
 
 run_Zcube() {
-  run_one "Zcube256" sudo env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
-    "${SIM}" -t 16 -w "${WL}" \
+  run_one "Zcube256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
+    "${SIM}" -t 1 -w "${WL}" \
     -n ./mytopo/Zcube_n16_k2_256g_8gps_200Gbps_H100 \
     -c ./myconfig/Zcube256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-Zcube256H100/" \
@@ -70,20 +70,19 @@ run_Zcube() {
 
 # MoE 建议关闭 PXN（与 simulaiton_order.sh 注释一致；RO256 段原脚本为 PXN=1，易崩可改 0）
 run_RO256() {
-  run_one "RO256" sudo env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=0 \
-    "${SIM}" -t 16 -w "${WL}" \
-    -n ./mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100 \
+  run_one "RO256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=1 \
+    "${SIM}" -t 1 -w "${WL}" \
+    -n ./mytopo/RailOnly_256g_8gps_p16a0.5_400Gbps_H100 \
     -c ./myconfig/RO256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-RO256H100/" \
     2>&1 | tee "${LOG_DIR}/Update-256gpu_Mixtral8x7B-MoE_RO256H100_copy_ns3.log"
 }
 
 run_ROFT256() {
-  run_one "ROFT256" /usr/bin/time -f 'wall=%e sec  user=%U sec  sys=%S sec' \
-    -o "${LOG_DIR}/Update-256gpu_Mixtral8x7B-MoE_ROFT256H100_copy_ns3.time" \
-    sudo env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=0 \
-    "${SIM}" -t 16 -w "${WL}" \
-    -n ./mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100 \
+  run_one "ROFT256" 
+      env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=0 \
+    "${SIM}" -t 1 -w "${WL}" \
+    -n ./mytopo/ROFT_256g_8gps_p16a0.5_400Gbps_H100 \
     -c ./myconfig/ROFT256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-ROFT256H100/" \
     2>&1 | tee "${LOG_DIR}/Update-256gpu_Mixtral8x7B-MoE_ROFT256H100_copy_ns3.log"
@@ -92,9 +91,9 @@ run_ROFT256() {
 run_ROFT256_woPXN() {
   run_one "ROFT256_woPXN" /usr/bin/time -f 'wall=%e sec  user=%U sec  sys=%S sec' \
     -o "${LOG_DIR}/Update-256gpu_Mixtral8x7B-MoE_ROFT256woPXNH100_copy_ns3.time" \
-    sudo env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=0 \
-    "${SIM}" -t 16 -w "${WL}" \
-    -n ./mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100 \
+      env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=0 \
+    "${SIM}" -t 1 -w "${WL}" \
+    -n ./mytopo/ROFT_256g_8gps_p16a0.5_400Gbps_H100 \
     -c ./myconfig/ROFT256_woPXNMoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-ROFT256woPXNH100/" \
     2>&1 | tee "${LOG_DIR}/Update-256gpu_Mixtral8x7B-MoE_ROFT256woPXNH100_copy_ns3.log"
