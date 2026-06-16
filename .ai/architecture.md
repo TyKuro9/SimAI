@@ -28,6 +28,8 @@ AstraNetworkAPI
         |
         +--> FlowSimNetWork + FlowSim EventQueue/Topology/Chunk backend
         |
+        +--> HtsimNetwork + htsim EventList/RoCE backend
+        |
         +--> SimAiPhyNetWork + Physical RDMA backend
 ```
 
@@ -55,6 +57,7 @@ AstraNetworkAPI
 - `recvHash`, `expeRecvHash`, `sentHash`, `receiver_pending_queue`: backend callback matching structures.
 - FlowSim-specific `EventQueue`, `Topology`, `Chunk`, `Link`, `Device`.
 - NS-3-specific `RdmaHw`, `RdmaDriver`, `QbbNetDevice`, `SwitchNode`, `SwitchMmu`, `RdmaQueuePair`.
+- htsim-specific `EventList`, `RoceSrc`, `RoceSink`, `Route`, and FatTree topology/connection-matrix utilities.
 
 ## Core Design Ideas
 
@@ -63,6 +66,7 @@ AstraNetworkAPI
 - Model workloads as layered compute/communication phases, not arbitrary executable model code.
 - Represent collective operations as flow graphs with explicit dependency and callback propagation.
 - Use NS-3 when protocol fidelity matters.
+- Use htsim/RoCE when a faster packet/event backend with RoCE-style routing experiments such as per-packet Spray is needed.
 - Use FlowSim when fast topology-scale flow completion approximation matters.
 - Keep batch experiments scriptable through topology/config/workload files.
 
@@ -72,6 +76,6 @@ AstraNetworkAPI
 | --- | --- | --- | --- |
 | Analytical | abstract timing | very fast estimation | `bin/SimAI_analytical` |
 | NS-3 | packet/QP/protocol | high-fidelity network behavior | `bin/SimAI_simulator` |
+| htsim/RoCE | event/packet RoCE model | fast RoCE route-strategy experiments | `bin/SimAI_htsim` |
 | FlowSim | flow/chunk/link sharing | large-scale fast topology comparison | `/home/zty/Topo/m4/SimAI/bin/SimAI_flowsim` |
 | Physical/RDMA | real RDMA traffic | physical cluster traffic generation | `bin/SimAI_phynet` |
-
