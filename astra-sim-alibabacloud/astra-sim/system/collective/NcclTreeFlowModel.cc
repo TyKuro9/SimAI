@@ -95,6 +95,9 @@ NcclTreeFlowModel::NcclTreeFlowModel(
       }
     }
   }
+  if (!ptr_flow_models || ptr_flow_models->empty() || m_channels == 0) {
+    this->enabled = false;
+  }
   for(int channel_id = 0 ;channel_id<m_channels;channel_id++){
     assert(zero_latency_packets->find(channel_id) == zero_latency_packets->end());
     (*zero_latency_packets)[channel_id] = 0;

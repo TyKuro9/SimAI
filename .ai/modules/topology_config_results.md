@@ -29,6 +29,18 @@
 - result CSVs: `EndToEnd.csv`, `detailed_*.csv`.
 - FCT files: `fct.txt`, `*_fct.txt`.
 
+## Repro Inputs
+
+- `experiments/ns3_repro/zcube64_csv/` contains a 64-GPU Zcube NS-3 CSV smoke:
+  - `Zcube_n8_k2_64g_8gps_200Gbps_H100`
+  - `Zcube64_ns3.conf`
+  - `dense_64_tiny.txt`
+  - `moe_64_tiny.txt`
+  - `moe_64_alltoall_ig_tiny.txt`
+  - `results_dense_tiny_verify/EndToEnd.csv`
+  - `results_moe_alltoall_ig_tiny_verify/EndToEnd.csv`
+- These files are for fast CSV/reporting verification only. They are not performance baselines and FCT output is not part of the acceptance signal.
+
 ## Inputs
 
 - topology generator scripts under `scripts/` or `astra-sim-alibabacloud/inputs/topo/`
@@ -52,4 +64,3 @@
 - Medium: path and naming changes can break scripts.
 - High: topology header format changes can break NS-3 and FlowSim parsers.
 - Medium: config output paths can silently write to unexpected locations.
-

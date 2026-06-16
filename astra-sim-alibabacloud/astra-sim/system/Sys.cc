@@ -1361,7 +1361,9 @@ bool Sys::mock_nccl_grobal_group_init(){
     int TP_size = workload->model_parallel_npu_group == 0
         ? total_nodes
         : workload->model_parallel_npu_group;
-    int PP_size = 1;
+    int PP_size = workload->pipeline_model_parallelism == 0
+        ? 1
+        : workload->pipeline_model_parallelism;
     int DP_size = all_gpus[0] / (TP_size * PP_size);
     int EP_size = workload->expert_parallel_npu_group;
     int DP_EP_size = DP_size / EP_size;
@@ -1374,8 +1376,10 @@ bool Sys::mock_nccl_comms_init(){
     int TP_size = workload->model_parallel_npu_group == 0
        ? total_nodes
        : workload->model_parallel_npu_group;
-    int PP_size = 1;
-    int DP_size = total_nodes / (TP_size * PP_size);
+    int PP_size = workload->pipeline_model_parallelism == 0
+       ? 1
+       : workload->pipeline_model_parallelism;
+    int DP_size = all_gpus[0] / (TP_size * PP_size);
     int EP_size = workload->expert_parallel_npu_group;
     int DP_EP_size = DP_size / EP_size;
     MockNccl::MockNcclComm* pComm;
@@ -1699,7 +1703,11 @@ void Sys::call_events() {
   }
   FINISH_CHECK: if ((finished_workloads == 1 && event_queue.size() == 0 && pending_sends.size() == 0) ||
       initialized == false) {
+#if defined(NS3_MTP) || defined(NS3_MPI)
+    return;
+#else
     delete this;
+#endif
   }
 
 }
@@ -1807,6 +1815,28 @@ void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
   scheduler_unit->notify_stream_added(stream->current_queue_id);
 
   NcclLog->writeLog(NcclLogLevel::DEBUG,"proceed_to_next_vnet_baseline :: exit");
+}
+
+int Sys::drain_finished_streams() {
+  std::vector<StreamBaseline*> finished_streams;
+  for (auto& queue_entry : active_Streams) {
+    for (BaseStream* stream : queue_entry.second) {
+      if (stream == nullptr) {
+        continue;
+      }
+      if (stream->phases_to_go.empty() &&
+          (stream->state == StreamState::Ready ||
+           stream->state == StreamState::Executing ||
+           stream->state == StreamState::Zombie)) {
+        finished_streams.push_back(static_cast<StreamBaseline*>(stream));
+      }
+    }
+  }
+
+  for (StreamBaseline* stream : finished_streams) {
+    proceed_to_next_vnet_baseline(stream);
+  }
+  return static_cast<int>(finished_streams.size());
 }
 void Sys::exiting() {}
 void Sys::insert_stream(std::list<BaseStream*>* queue, BaseStream* baseStream) {
@@ -2083,7 +2113,9 @@ void Sys::handleEvent(void* arg) {
       if(node->event_queue.find(Sys::boostedTick())==node->event_queue.end())
         if ((node->finished_workloads == 1 && node->event_queue.size() == 0 && node->pending_sends.size() == 0) ||
       node->initialized == false) {
+#if !defined(NS3_MTP) && !defined(NS3_MPI)
         delete node;
+#endif
       }
       #ifdef NS3_MTP  
       cs.ExitSection();

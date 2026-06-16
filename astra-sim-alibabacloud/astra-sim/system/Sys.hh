@@ -196,6 +196,7 @@ class Sys : public Callable {
       EventType event,
       CallData* callData,
       int cycles);
+  int drain_finished_streams();
   void insert_into_ready_list(BaseStream* stream);
   #ifdef PHY_MTP
   void insert_into_running_list(StreamBaseline* stream);

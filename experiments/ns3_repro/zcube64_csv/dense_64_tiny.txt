@@ -1,0 +1,8 @@
+HYBRID_TRANSFORMER_FWD_IN_BCKWD model_parallel_NPU_group: 8 ep: 1 pp: 2 vpp: 1 ga: 1 all_gpus: 64 checkpoints: 0 checkpoint_initiates: 0 pp_comm: 1024
+6
+grad_norm	-1	1	ALLGATHER	8192	1	NONE	0	1	REDUCESCATTER	8192	1
+embedding_layer	-1	1	NONE	0	1	NONE	0	1	NONE	0	1
+attention_column	-1	1	ALLGATHER	4096	1	REDUCESCATTER	0	1	NONE	0	1
+attention_row	-1	1	REDUCESCATTER	4096	1	ALLGATHER	4096	1	NONE	0	1
+mlp_column	-1	1	ALLGATHER	4096	1	NONE	0	1	NONE	0	1
+mlp_row	-1	1	REDUCESCATTER	4096	1	NONE	4096	1	NONE	0	1

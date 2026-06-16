@@ -357,7 +357,46 @@ int main(int argc, char *argv[]) {
 
   // Stop time must be configured before Run().
   Simulator::Stop(Seconds(2000000000));
-  Simulator::Run();
+  while (true) {
+    Simulator::Run();
+
+    bool made_progress = false;
+    while (true) {
+      int drained_streams = 0;
+      int flushed_events = 0;
+      for (auto* system : systems) {
+        if (system != nullptr) {
+          drained_streams += system->drain_finished_streams();
+        }
+      }
+      if (drained_streams > 0) {
+        made_progress = true;
+        std::cout << "[NS3] Drained " << drained_streams
+                  << " finished streams after simulator event queue became empty"
+                  << std::endl;
+      }
+      for (auto* system : systems) {
+        if (system != nullptr &&
+            system->event_queue.find(AstraSim::Sys::boostedTick()) != system->event_queue.end()) {
+          system->call_events();
+          flushed_events++;
+        }
+      }
+      if (flushed_events > 0) {
+        made_progress = true;
+        std::cout << "[NS3] Flushed " << flushed_events
+                  << " ASTRA event queues after final stream drain"
+                  << std::endl;
+      }
+      if (drained_streams == 0 && flushed_events == 0) {
+        break;
+      }
+    }
+    if (!made_progress) {
+      break;
+    }
+  }
+
   Simulator::Destroy();
   
   #ifdef NS3_MPI
