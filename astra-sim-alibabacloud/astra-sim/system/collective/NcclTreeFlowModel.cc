@@ -52,8 +52,12 @@ NcclTreeFlowModel::NcclTreeFlowModel(
   this->nodes_in_ring = ring_topology->get_nodes_in_ring();
   this->parallel_reduce = 1;
   this->toggle = false;
+  this->processed = false;
+  this->send_back = false;
+  this->NPU_to_MA = false;
   this->name = Name::Ring;
   this->enabled = true;
+  this->exited.store(false);
   this->m_channels = treechannels;
   this->judge_exit_flag.store(false);
   this->judge_exit_mutex.unlock();
@@ -609,6 +613,10 @@ bool NcclTreeFlowModel::ready(int channel_id, int flow_id) {
 }
 
 void NcclTreeFlowModel::exit() {
+  if (exited.exchange(true)) {
+    return;
+  }
+  enabled = false;
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
   #ifdef PHY_MTP
   auto now = std::chrono::system_clock::now();
@@ -626,13 +634,12 @@ void NcclTreeFlowModel::exit() {
   MPI_Barrier(MPI_COMM_WORLD);
   sleep(1);
   #else
-  for(std::pair<std::pair<int, int>, std::list<MyPacket>> packet: packets) {
-  if(packet.second.size() != 0)
-    packet.second.clear();
+  for(auto& packet: packets) {
+    if(packet.second.size() != 0)
+      packet.second.clear();
   }
   #endif
   stream->owner->proceed_to_next_vnet_baseline((StreamBaseline*)stream);
-  NcclLog->writeLog(NcclLogLevel::DEBUG,"NcclTreeFlowModel exit");
   return;
 }
 

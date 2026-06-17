@@ -1531,7 +1531,9 @@ DataSet* Sys::generate_collective(
             InjectionPolicy::Normal,
             implementation_per_dimension[dim_mapper[dim]],
             boost_mode);
-        vect.push_back(phase);
+        if (phase.enabled) {
+          vect.push_back(phase);
+        }
         tmp = phase.final_data_size;
       }
     } else if (
@@ -1558,7 +1560,9 @@ DataSet* Sys::generate_collective(
             InjectionPolicy::Normal,
             implementation_per_dimension[dim_mapper[dim]],
             boost_mode);
-        vect.push_back(phase);
+        if (phase.enabled) {
+          vect.push_back(phase);
+        }
         tmp = phase.final_data_size;
       }
       dim--;
@@ -1580,7 +1584,9 @@ DataSet* Sys::generate_collective(
             InjectionPolicy::Normal,
             implementation_per_dimension[dim_mapper[dim]],
             boost_mode);
-        vect.push_back(phase);
+        if (phase.enabled) {
+          vect.push_back(phase);
+        }
         tmp = phase.final_data_size;
       }
     } else {
@@ -1610,7 +1616,9 @@ DataSet* Sys::generate_collective(
             InjectionPolicy::Normal,
             implementation_per_dimension[dim_mapper[dim]],
             boost_mode);
-        vect.push_back(phase);
+        if (phase.enabled) {
+          vect.push_back(phase);
+        }
         tmp = phase.final_data_size;
       }
       while (dim > 0 &&
@@ -1633,7 +1641,9 @@ DataSet* Sys::generate_collective(
             InjectionPolicy::Normal,
             implementation_per_dimension[dim_mapper[dim]],
             boost_mode);
-        vect.push_back(phase);
+        if (phase.enabled) {
+          vect.push_back(phase);
+        }
         tmp = phase.final_data_size;
       }
       dim--;
@@ -1655,7 +1665,9 @@ DataSet* Sys::generate_collective(
             InjectionPolicy::Normal,
             implementation_per_dimension[dim_mapper[dim]],
             boost_mode);
-        vect.push_back(phase);
+        if (phase.enabled) {
+          vect.push_back(phase);
+        }
         tmp = phase.final_data_size;
       }
     }

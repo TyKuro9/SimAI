@@ -55,6 +55,7 @@ class NcclTreeFlowModel : public Algorithm {
   bool processed;   
   bool send_back;
   bool NPU_to_MA;
+  std::atomic<bool> exited;
 
   std::map<int, int> indegree_mapping; 
   std::map<int, int> inprocessing_indegree; 
