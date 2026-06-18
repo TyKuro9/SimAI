@@ -29,10 +29,10 @@ THREADS="${FLOWSIM_THREADS:-32}"
 ALL_CASES=(
   "Meta|Meta_Topo_1024g_8gps_400Gbps_H100|MetaMoE|Update-1024gpu_Mixtral8x7B-MoE_Meta1024H100_flowsim.log"
   "HPN|AlibabaHPN_1024g_8gps_DualToR_DualPlane_200Gbps_H100|HPNMoE|Update-1024gpu_Mixtral8x7B-MoE_HPN1024H100_flowsim.log"
-  "DeepSeek|DeepSeek_1024g_8gps_p16a0.5_400Gbps_H100|DeepSeekMoE|Update-1024gpu_Mixtral8x7B-MoE_DeepSeek1024H100_flowsim.log"
+  "DeepSeek|DeepSeek_1024g_8gps_p32a0.5_400Gbps_H100|DeepSeekMoE|Update-1024gpu_Mixtral8x7B-MoE_DeepSeek1024H100_flowsim.log"
   "Zcube|Zcube_n32_k2_1024g_8gps_200Gbps_H100|ZcubeMoE|Update-1024gpu_Mixtral8x7B-MoE_Zcube1024H100_flowsim.log"
-  "RO|RailOnly_1024g_8gps_p64a0.5_400Gbps_H100|ROMoE|Update-1024gpu_Mixtral8x7B-MoE_RO1024H100_flowsim.log"
-  "ROFT|ROFT_1024g_8gps_p64a0.5_400Gbps_H100|ROFTMoE|Update-1024gpu_Mixtral8x7B-MoE_ROFT1024H100_flowsim.log"
+  "RO|RailOnly_1024g_8gps_p32a0.5_400Gbps_H100|ROMoE|Update-1024gpu_Mixtral8x7B-MoE_RO1024H100_flowsim.log"
+  "ROFT|ROFT_1024g_8gps_p32a0.5_400Gbps_H100|ROFTMoE|Update-1024gpu_Mixtral8x7B-MoE_ROFT1024H100_flowsim.log"
 )
 
 ALL_TOPOS=(Meta HPN DeepSeek Zcube RO ROFT)

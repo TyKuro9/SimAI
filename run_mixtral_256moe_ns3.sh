@@ -8,10 +8,34 @@ cd "$(dirname "$0")"
 
 NS3_CSV_BASE="./experiments/ns3_results/csv"
 LOG_DIR="./experiments/ns3_results"
-# mkdir -p "${NS3_CSV_BASE}" "${LOG_DIR}" ./simulation_output/meta256
+OUTPUT_DIRS=(
+  "${NS3_CSV_BASE}/Mixtral-HPN256H100"
+  "${NS3_CSV_BASE}/Mixtral-Meta256A100"
+  "${NS3_CSV_BASE}/Mixtral-DeepSeek256H800"
+  "${NS3_CSV_BASE}/Mixtral-Zcube256H100"
+  "${NS3_CSV_BASE}/Mixtral-RO256H100"
+  "${NS3_CSV_BASE}/Mixtral-ROFT256H100"
+  "${NS3_CSV_BASE}/Mixtral-ROFT256woPXNH100"
+)
+mkdir -p "${LOG_DIR}" "${NS3_CSV_BASE}"
+for dir in "${LOG_DIR}" "${NS3_CSV_BASE}"; do
+  if [[ ! -w "${dir}" ]]; then
+    echo "输出目录不可写: ${dir}" >&2
+    echo "如果目录属于 root/nobody，请先运行: bash scripts/fix_local_permissions.sh" >&2
+    exit 1
+  fi
+done
+mkdir -p "${OUTPUT_DIRS[@]}"
+for dir in "${OUTPUT_DIRS[@]}"; do
+  if [[ ! -w "${dir}" ]]; then
+    echo "输出目录不可写: ${dir}" >&2
+    echo "如果目录属于 root/nobody，请先运行: bash scripts/fix_local_permissions.sh" >&2
+    exit 1
+  fi
+done
 
-# workload 文件名含 * 与空格，必须单引号
-WL='./my_workloads/H100-Mixtral_8*7B-world_size256-tp8-pp2-ep8-gbs256-mbs1-seq2048-MOE-True-GEMM-True-flash_attn-True copy.txt'
+# workload 文件名含 * 与空格，默认路径必须单引号；可用环境变量 WL 覆盖。
+WL="${WL:-./my_workloads/H100-Mixtral_8*7B-world_size256-tp8-pp2-ep8-gbs256-mbs1-seq2048-MOE-True-GEMM-True-flash_attn-True copy.txt}"
 
 SIM="./bin/SimAI_simulator"
 FAST_SIM="astra-sim-alibabacloud/extern/network_backend/ns3-interface/simulation/build/scratch/ns3.36.1-AstraSimFastNetwork-debug"
@@ -26,7 +50,7 @@ run_one() {
 
 run_HPN() {
   run_one "HPN256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
-    "${SIM}" -t 1 -w "${WL}" \
+    "${SIM}" -t 16 -w "${WL}" \
     -n ./mytopo/AlibabaHPN_256g_8gps_DualToR_DualPlane_200Gbps_H100 \
     -c ./myconfig/HPN256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-HPN256H100/" \
@@ -35,7 +59,7 @@ run_HPN() {
 
 run_Meta() {
   run_one "Meta256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
-    "${SIM}" -t 1 -w "${WL}" \
+    "${SIM}" -t 16 -w "${WL}" \
     -n ./mytopo/Meta_Topo_256g_8gps_400Gbps_A100 \
     -c ./myconfig/Meta256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-Meta256A100/" \
@@ -44,7 +68,7 @@ run_Meta() {
 
 run_MetaFast() {
   run_one "Meta-fast256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
-    "${FAST_SIM}" -t 1 -w "${WL}" \
+    "${FAST_SIM}" -t 16 -w "${WL}" \
     -n ./mytopo/Meta_Topo_256g_8gps_400Gbps_A100 \
     -c ./myconfig/Meta-fast256MoE.conf \
     2>&1 | tee "${LOG_DIR}/Update-256gpu_Mixtral8x7B-MoE_Meta-fast256A100_copy_ns3.log"
@@ -52,7 +76,7 @@ run_MetaFast() {
 
 run_DeepSeek() {
   run_one "DeepSeek256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
-    "${SIM}" -t 1 -w "${WL}" \
+    "${SIM}" -t 16 -w "${WL}" \
     -n ./mytopo/DeepSeek_256g_8gps_p16a0.5_400Gbps_H800 \
     -c ./myconfig/DeepSeek256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-DeepSeek256H800/" \
@@ -61,7 +85,7 @@ run_DeepSeek() {
 
 run_Zcube() {
   run_one "Zcube256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 \
-    "${SIM}" -t 1 -w "${WL}" \
+    "${SIM}" -t 16 -w "${WL}" \
     -n ./mytopo/Zcube_n16_k2_256g_8gps_200Gbps_H100 \
     -c ./myconfig/Zcube256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-Zcube256H100/" \
@@ -71,7 +95,7 @@ run_Zcube() {
 # MoE 建议关闭 PXN（与 simulaiton_order.sh 注释一致；RO256 段原脚本为 PXN=1，易崩可改 0）
 run_RO256() {
   run_one "RO256"   env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=1 \
-    "${SIM}" -t 1 -w "${WL}" \
+    "${SIM}" -t 16 -w "${WL}" \
     -n ./mytopo/RailOnly_256g_8gps_p16a0.5_400Gbps_H100 \
     -c ./myconfig/RO256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-RO256H100/" \
@@ -81,7 +105,7 @@ run_RO256() {
 run_ROFT256() {
   run_one "ROFT256" 
       env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=0 \
-    "${SIM}" -t 1 -w "${WL}" \
+    "${SIM}" -t 16 -w "${WL}" \
     -n ./mytopo/ROFT_256g_8gps_p16a0.5_400Gbps_H100 \
     -c ./myconfig/ROFT256MoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-ROFT256H100/" \
@@ -92,7 +116,7 @@ run_ROFT256_woPXN() {
   run_one "ROFT256_woPXN" /usr/bin/time -f 'wall=%e sec  user=%U sec  sys=%S sec' \
     -o "${LOG_DIR}/Update-256gpu_Mixtral8x7B-MoE_ROFT256woPXNH100_copy_ns3.time" \
       env AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=0 \
-    "${SIM}" -t 1 -w "${WL}" \
+    "${SIM}" -t 16 -w "${WL}" \
     -n ./mytopo/ROFT_256g_8gps_p16a0.5_400Gbps_H100 \
     -c ./myconfig/ROFT256_woPXNMoE.conf \
     -o "${NS3_CSV_BASE}/Mixtral-ROFT256woPXNH100/" \

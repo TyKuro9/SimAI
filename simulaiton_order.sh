@@ -65,7 +65,7 @@ sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 ./bin/SimAI_simulator \
 sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=1 ./bin/SimAI_simulator \
   -t 16 \
   -w ./my_workloads/H100-gpt_22B-world_size256-tp8-pp8-ep1-gbs384-mbs1-seq2048-MOE-False-GEMM-False-flash_attn-False.txt \
-  -n ./mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100 \
+  -n ./mytopo/RailOnly_256g_8gps_p16a0.5_400Gbps_H100 \
   -c ./myconfig/RO256.conf \
   -o "${NS3_CSV_BASE}/RO256H100/" \
   2>&1 | tee experiments/ns3_results/Update-256gpu_22B_RO256H100_ns3.log
@@ -76,7 +76,7 @@ sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=1 ./bin/SimAI_simulator \
   sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=1 ./bin/SimAI_simulator \
   -t 16 \
   -w ./my_workloads/H100-gpt_22B-world_size256-tp8-pp8-ep1-gbs384-mbs1-seq2048-MOE-False-GEMM-False-flash_attn-False.txt \
-  -n ./mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100 \
+  -n ./mytopo/ROFT_256g_8gps_p16a0.5_400Gbps_H100 \
   -c ./myconfig/ROFT256.conf \
   -o "${NS3_CSV_BASE}/ROFT256H100/" \
   2>&1 | tee experiments/ns3_results/Update-256gpu_22B_ROFT256H100_ns3.log
@@ -87,7 +87,7 @@ sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=1 ./bin/SimAI_simulator \
   sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=0 ./bin/SimAI_simulator \
   -t 16 \
   -w ./my_workloads/H100-gpt_22B-world_size256-tp8-pp8-ep1-gbs384-mbs1-seq2048-MOE-False-GEMM-False-flash_attn-False.txt \
-  -n ./mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100 \
+  -n ./mytopo/ROFT_256g_8gps_p16a0.5_400Gbps_H100 \
   -c ./myconfig/ROFT256_woPXN.conf \
   -o "${NS3_CSV_BASE}/ROFT256woPXNH100/" \
   2>&1 | tee experiments/ns3_results/Update-256gpu_22B_ROFT256woPXNH100_ns3.log
@@ -150,7 +150,7 @@ sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 ./bin/SimAI_simulator \
 sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=1 ./bin/SimAI_simulator \
   -t 16 \
   -w './my_workloads/H100-Mixtral_8*7B-world_size256-tp8-pp2-ep8-gbs256-mbs1-seq2048-MOE-True-GEMM-True-flash_attn-True.txt' \
-  -n ./mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100 \
+  -n ./mytopo/RailOnly_256g_8gps_p16a0.5_400Gbps_H100 \
   -c ./myconfig/RO256MoE.conf \
   -o "${NS3_CSV_BASE}/Mixtral-RO256H100/" \
   2>&1 | tee experiments/ns3_results/Update-256gpu_Mixtral8x7B-MoE_RO256H100_ns3.log
@@ -161,7 +161,7 @@ sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=1 ./bin/SimAI_simulator \
   sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=0 ./bin/SimAI_simulator \
   -t 16 \
   -w './my_workloads/H100-Mixtral_8*7B-world_size256-tp8-pp2-ep8-gbs256-mbs1-seq2048-MOE-True-GEMM-True-flash_attn-True.txt' \
-  -n ./mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100 \
+  -n ./mytopo/ROFT_256g_8gps_p16a0.5_400Gbps_H100 \
   -c ./myconfig/ROFT256MoE.conf \
   -o "${NS3_CSV_BASE}/Mixtral-ROFT256H100/" \
   2>&1 | tee experiments/ns3_results/Update-256gpu_Mixtral8x7B-MoE_ROFT256H100_ns3.log
@@ -172,7 +172,7 @@ sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=1 ./bin/SimAI_simulator \
   sudo AS_SEND_LAT=3 AS_NVLS_ENABLE=0 AS_PXN_ENABLE=0 ./bin/SimAI_simulator \
   -t 16 \
   -w './my_workloads/H100-Mixtral_8*7B-world_size256-tp8-pp2-ep8-gbs256-mbs1-seq2048-MOE-True-GEMM-True-flash_attn-True.txt' \
-  -n ./mytopo/ROFT_256g_8gps_p64a0.5_400Gbps_H100 \
+  -n ./mytopo/ROFT_256g_8gps_p16a0.5_400Gbps_H100 \
   -c ./myconfig/ROFT256_woPXNMoE.conf \
   -o "${NS3_CSV_BASE}/Mixtral-ROFT256woPXNH100/" \
   2>&1 | tee experiments/ns3_results/Update-256gpu_Mixtral8x7B-MoE_ROFT256woPXNH100_ns3.log

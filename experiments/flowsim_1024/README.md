@@ -4,9 +4,16 @@ Workload（固定）：
 
 `/home/zty/Topo/SimAI_TyKuro9/my_workloads/H100-gpt_175B-world_size1024-tp8-pp8-ep1-gbs1536-mbs1-seq4096-MOE-False-GEMM-False-flash_attn-False.txt`
 
-拓扑目录：`/home/zty/Topo/SimAI_TyKuro9/mytopo/1024/`
+拓扑目录：`/home/zty/Topo/SimAI_TyKuro9/mytopo/1024/`（交换机容量 **12.8 Tbps**，256 为 6.4 Tbps）
 
 ## 前置条件
+
+0. **（可选）重新生成拓扑**：
+
+```bash
+cd /home/zty/Topo/SimAI_TyKuro9
+python3 scripts/generate_1024_topos.py
+```
 
 1. **FlowSim 二进制**在 `m4/SimAI` 中构建（`SimAI_TyKuro9` 当前未集成 flowsim 后端）：
 
@@ -64,21 +71,21 @@ $FLOWSIM -t $T -w $WL -n $TOPO/AlibabaHPN_1024g_8gps_DualToR_DualPlane_200Gbps_H
 ### DeepSeek
 
 ```bash
-$FLOWSIM -t $T -w $WL -n $TOPO/DeepSeek_1024g_8gps_p16a0.5_400Gbps_H100 -o $OUT/DeepSeek/ \
+$FLOWSIM -t $T -w $WL -n $TOPO/DeepSeek_1024g_8gps_p32a0.5_400Gbps_H100 -o $OUT/DeepSeek/ \
   2>&1 | tee $LOG/Update-1024gpu_175B_DeepSeek1024H100_flowsim.log
 ```
 
 ### RO（RailOnly）
 
 ```bash
-$FLOWSIM -t $T -w $WL -n $TOPO/RailOnly_1024g_8gps_p64a0.5_400Gbps_H100 -o $OUT/RO/ \
+$FLOWSIM -t $T -w $WL -n $TOPO/RailOnly_1024g_8gps_p32a0.5_400Gbps_H100 -o $OUT/RO/ \
   2>&1 | tee $LOG/Update-1024gpu_175B_RO1024H100_flowsim.log
 ```
 
 ### ROFT
 
 ```bash
-$FLOWSIM -t $T -w $WL -n $TOPO/ROFT_1024g_8gps_p64a0.5_400Gbps_H100 -o $OUT/ROFT/ \
+$FLOWSIM -t $T -w $WL -n $TOPO/ROFT_1024g_8gps_p32a0.5_400Gbps_H100 -o $OUT/ROFT/ \
   2>&1 | tee $LOG/Update-1024gpu_175B_ROFT1024H100_flowsim.log
 ```
 
@@ -112,9 +119,9 @@ bash /home/zty/Topo/SimAI_TyKuro9/experiments/flowsim_1024/run_all.sh
 |------|------|-------------------------|
 | Meta | `Meta_Topo_1024g_8gps_400Gbps_H100` | `myconfig/1024/Meta.conf` |
 | HPN | `AlibabaHPN_1024g_8gps_DualToR_DualPlane_200Gbps_H100` | `myconfig/1024/HPN.conf` |
-| DeepSeek | `DeepSeek_1024g_8gps_p16a0.5_400Gbps_H100` | `myconfig/1024/DeepSeek.conf` |
-| RO | `RailOnly_1024g_8gps_p64a0.5_400Gbps_H100` | `myconfig/1024/RO.conf` |
-| ROFT | `ROFT_1024g_8gps_p64a0.5_400Gbps_H100` | `myconfig/1024/ROFT.conf` |
+| DeepSeek | `DeepSeek_1024g_8gps_p32a0.5_400Gbps_H100` | `myconfig/1024/DeepSeek.conf` |
+| RO | `RailOnly_1024g_8gps_p32a0.5_400Gbps_H100` | `myconfig/1024/RO.conf` |
+| ROFT | `ROFT_1024g_8gps_p32a0.5_400Gbps_H100` | `myconfig/1024/ROFT.conf` |
 | Zcube | `Zcube_n32_k2_1024g_8gps_200Gbps_H100` | `myconfig/1024/Zcube.conf` |
 
 详见 [`mytopo/1024/README.md`](../../mytopo/1024/README.md)。
