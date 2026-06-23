@@ -69,6 +69,7 @@ External implementation:
 - `detailed_*.csv`
 - `fct.txt`
 - batch logs
+- 256 error-probability sweep summaries and plots under `results/fault_tolerance_256_flowsim_*` when using `experiments/flowsim_256/run_fault_probability_sweep.py`
 
 ## Dependencies
 
@@ -154,6 +155,7 @@ External implementation:
 ## Performance Notes
 
 - FlowSim runtime can be dominated by stdout when per-flow/per-collective verbose logs are enabled on large MoE workloads. Keep verbose disabled for normal batch runs; leave `[LAYER]` progress enabled for observability or set `FLOWSIM_PROGRESS=0` for maximum quiet.
+- Current FlowSim parses topology `error_rate` but does not use it in link-sharing or completion-time calculations. For FlowSim JCT-versus-error-probability experiments, `experiments/flowsim_256/run_fault_probability_sweep.py` uses a generated-topology approximation that scales inter-server bandwidth by `(1-p)` and records `p` in the topology error-rate column.
 - The final drain adds a small end-of-run cleanup step but is required to trigger `Workload::report()` for Zcube MoE cases where the FlowSim event queue empties before upper streams are counted finished.
 - The `(src,dst)` routing cache is the first low-risk acceleration point because it avoids repeated path lookup without changing link sharing, chunk scheduling, callbacks, or workload ordering.
 - Current Zcube profiling evidence says route lookup is no longer material: the pre-optimization 120s sample spent ~114s in `Topology::update_link_states()` versus ~17ms in route lookup.
@@ -162,6 +164,7 @@ External implementation:
 - After lazy min-heap bottleneck selection, a 120s Zcube profile processed 675664 sends and 674553 chunk completions; `Topology::update_link_states` averaged ~1.750 ms/call.
 - Future acceleration should focus on reducing the remaining `update_link_states` data-structure churn, completion scheduling, and possibly event-time ordering; route lookup and batch processing are no longer material.
 - Full 256 Zcube MoE completion remains expensive but is now proven to finish. A previous `FLOWSIM_PROGRESS=0 timeout 7200 bash run_256moe_flowsim.sh Zcube` timed out before workload reporting; a later 28800s timeout run with FCT writes disabled completed normally and wrote the non-empty `EndToEnd.csv`.
+- Full 1837-layer Mixtral 256 MoE error-probability sweeps are too expensive for quick interactive runs. A Meta 1% bandwidth-scale point ran for more than 7 minutes before interruption. For quick curve generation, use `experiments/flowsim_256/moe_256_fault_comm.txt`, which keeps 256-GPU MoE communication structure but reduces the layer count to 8.
 
 ## Modification Risk
 

@@ -187,6 +187,47 @@
 - Rationale: the user wanted RoCE-style Spray routing; per-data-packet deterministic round-robin/permutation is reproducible and matches the chosen first-version policy.
 - Verification: native `htsim_roce` tiny topology completed a flow with `-strat perm -paths 2`.
 
+### 2026-06-22: Run htsim as a Real ASTRA Backend and Preserve EndToEnd Reporting
+
+- Changed the htsim ASTRA build to define `HTSIM_BACKEND` without defining `ANALYTI`.
+- Excluded physical RDMA/MPI sources for the htsim build while keeping normal ASTRA workload, MockNCCL, stream, dataset, and `Workload::report()` semantics.
+- Added htsim `fct.txt` output in the ASTRA-facing frontend so every completed htsim flow records `src dst tag flow_id size_bytes start_ns end_ns fct_ns route_strategy`.
+- Rationale: the earlier analytical-style build could exit without exercising real send/recv callbacks, which produced empty `EndToEnd.csv` even when the frontend appeared to run.
+- Verification: `./scripts/build.sh -c htsim` succeeds and the 40-layer 256 Meta MoE htsim run writes both non-empty FCT and non-empty `EndToEnd.csv`.
+
+### 2026-06-22: Add htsim Final-Drain and Late-Callback Guards
+
+- Added a htsim final progress loop after `EventList` exhaustion:
+  - drain `Zombie` streams through the normal `Sys::proceed_to_next_vnet_baseline()` path;
+  - start final uninitialized `Ready` streams whose phase list is exhausted;
+  - flush safe ASTRA workload/report events.
+- Mark completed streams `Dead` instead of immediately deleting them in `HTSIM_BACKEND` builds.
+- Drop late htsim `PacketBundle`, `PacketReceived`, and `PacketSentFinshed` callbacks when their owner stream is `Dead`.
+- Rationale: htsim can finish its event queue while ASTRA still has final stream/report work pending; forcing deletion created dangling callbacks during the final drain, while skipping the drain left `EndToEnd.csv` empty.
+- Verification: `timeout 300s bin/SimAI_htsim -w /tmp/htsim_meta256_short.txt -n mytopo/Meta_Topo_256g_8gps_400Gbps_A100 -c myconfig/Meta256MoE.conf -o experiments/htsim_results/csv/Meta256MoE_short_retest4 -r spray_rr` exited 0, logged `all passes finished at time: 108372751`, wrote 45 `EndToEnd.csv` lines, and wrote 642561 `fct.txt` lines.
+- Risk: htsim `Dead` stream retention intentionally leaks completed stream objects for the process lifetime. This is acceptable for the first htsim backend because it avoids dangling callbacks in a short-lived simulator process; revisit with ownership-safe event cancellation if htsim becomes long-running service code.
+
+### 2026-06-22: Make ASTRA htsim Use Packet-Level RoCE by Default
+
+- Replaced the ASTRA-facing htsim completion estimator as the default path with real htsim packet-level RoCE.
+- `HtsimNetwork` now parses SimAI topology edge lists into htsim directed `Queue`/`Pipe` objects, caches GPU-pair shortest-path route sets, creates `RoceSrc/RoceSink` objects per ASTRA send, and completes ASTRA send/recv callbacks from a htsim flow-done trigger.
+- `single` uses the first shortest path, `ecmp` uses a deterministic per-flow path choice, and `spray_rr` gives all cached shortest paths to `RoceSrc::set_paths()` so data packets round-robin across paths. ACK/NACK remains on one stable reverse path.
+- Kept the old flow-level estimator behind `HTSIM_FLOW_LEVEL=1` for debugging and for cases where packet-level runtime is too high.
+- Added startup logging of `packet_level=1/0` so experiment logs make the simulation granularity explicit.
+- Suppressed native RoCE per-flow start/finish stdout by default; set `HTSIM_ROCE_VERBOSE=1` for those logs.
+- Rationale: topology-sensitive Spray experiments require packet-level path, queue, and ACK behavior; the previous ASTRA-facing estimator could produce non-empty CSV but could not measure topology-dependent packet-level routing behavior.
+- Verification:
+  - `./scripts/build.sh -c htsim` completed.
+  - Meta 256 dense scaled smoke (`/tmp/htsim_dense256_short10_1mib.txt`, `-r spray_rr`) logged `packet_level=1`, `all passes finished at time: 65258013`, wrote 15 `EndToEnd.csv` rows, and wrote 144897 `fct.txt` rows.
+  - Six 256 topologies completed with the same scaled workload under both `spray_rr` and `ecmp`, and finish times differ by topology and strategy.
+  - The uncapped first-10-layer normal dense workload timed out after 120s on Meta but produced 14224 FCT rows, confirming packet-level work was progressing but full-size dense packet simulation needs long batch/tmux execution.
+
+### 2026-06-22: Use Explicit `/usr/bin` PATH for NS-3 Build Verification
+
+- Verified `env PATH=/usr/bin:/bin:$PATH ./scripts/build.sh -c ns3` after htsim changes.
+- Rationale: this environment's default `cmake` can resolve to `/snap/bin/cmake`, whose snap wrapper cannot run in the sandbox and fails before ns-3 configuration. Putting `/usr/bin` first uses the working system CMake.
+- Verification: NS-3 configured, built, and linked `ns3.36.1-AstraSimNetwork-debug`.
+
 ### 2026-06-16: Keep NS-3 Sys Lifetime Owned by NS-3 Entrypoint
 
 - Changed `Sys::call_events()` so `NS3_MTP`/`NS3_MPI` builds do not `delete this` after local workload/event completion.
@@ -224,6 +265,80 @@
   - `moe_64_alltoall_ig_tiny.txt` exited 0 and wrote `experiments/ns3_repro/zcube64_csv/results_moe_alltoall_ig_tiny_verify/EndToEnd.csv` with 1932 bytes.
   - Both logs contain `workload stats for the job scheduled` and `all passes finished`.
 - Decision: for NS-3 CSV/reporting regressions, use the dense tiny case first and the MoE backward all-to-all tiny case second before escalating to expensive 256-GPU full-topology runs.
+
+### 2026-06-16: Classify Zcube 256 MoE Expert-Parallel Paths Against RO
+
+- Analyzed the current 256-GPU Mixtral MoE FlowSim inputs for Zcube and RO using the documented FlowSim routing behavior (`GetFlowSimPathByNodeIds`) and MockNCCL EP grouping.
+- EP groups for `tp8/pp2/ep8/all_gpus256` are same-local-rank rail groups across 8 consecutive servers, so the expert-parallel `ALLTOALL_EP` traffic contains no same-server GPU-to-GPU pairs.
+- Classification convention:
+  - same-server non-EP GPU pairs use the local NVSwitch path.
+  - Zcube switches `288..303` are treated as local/pair switches.
+  - Zcube switches `304..319` are treated as same-rail multi-server switches.
+  - RO switches `288..319` are treated as same-rail multi-server switches.
+- Result over 1792 directed EP GPU pairs:
+  - Zcube: 14.3% local/pair-switch paths, 42.9% single same-rail multi-server-switch paths, 42.9% two ordinary-switch paths.
+  - RO: 100% single same-rail multi-server-switch paths.
+- Decision: explain Zcube's slower 256 MoE EP behavior relative to RO primarily by the longer and more contended expert-parallel all-to-all paths. Current `EndToEnd.csv` evidence shows Zcube `Expose_EP_comm=190191` versus RO `Expose_EP_comm=79911`; total time is `3158908` versus `3138013`.
+
+### 2026-06-17: Implement Fixed-Probability Fault-Tolerance Driver at Topology Level
+
+- Inspected existing link-failure support before editing. NS-3 already supports a single scheduled `LINK_DOWN` event through `TakeDownLink()`, which disables the bidirectional link, recomputes routes, reinstalls routing tables, and redistributes QPs. The per-link topology `error_rate` and `ERROR_RATE_PER_LINK` config are packet error models, not link removal.
+- Added `scripts/fault_tolerance_experiments.py` instead of rewriting topology generation or routing.
+- The driver samples failed inter-server links with one fixed `--link-failure-probability` across all seeds, writes failed topology files, and optionally invokes the existing FlowSim binary so startup topology parsing and routing precomputation are reused.
+- Random link failure excludes GPU-to-NVSwitch/NVSwitch-to-GPU links so intra-server NVLink/NVSwitch links do not fail.
+- Switch failure is emulated by failing all links incident to `--failed-switch-id`; `--failed-switch-role tor` is intentionally unavailable because current topology files do not encode a portable ToR role.
+- Outputs use the requested `results/fault_tolerance/` layout with raw/summary CSVs and `metadata.json`.
+- Rationale: a topology-level driver is the minimum reviewable implementation that preserves no-failure experiments, avoids changing NS-3/FlowSim routing internals, and still reuses the existing link-down semantics of removing failed links before route computation.
+- Verification:
+  - `python3 -m py_compile scripts/fault_tolerance_experiments.py`
+  - dry-run sanity on `experiments/ns3_repro/zcube64_csv/Zcube_n8_k2_64g_8gps_200Gbps_H100` passed for `p=0`, `p=1`, and switch-id incident-link failure.
+  - FlowSim `p=0` smoke with `dense_64_tiny.txt` wrote matching normal/failed JCT values of `11.0`.
+  - FlowSim switch-id `72` smoke completed and wrote raw/summary outputs.
+  - `p=1` dry-run failed all 192 inter-server links and reduced all-to-all connectivity ratio to `0.1111111111111111`, leaving only same-server NVSwitch connectivity.
+
+### 2026-06-17: Use Bandwidth-Scale Approximation for FlowSim Error-Probability JCT Curves
+
+- Added `experiments/flowsim_256/run_fault_probability_sweep.py` for 256-GPU FlowSim JCT curves with error probability on the x-axis and JCT(s) on the y-axis.
+- Current FlowSim parses topology `error_rate` but does not use it in flow completion; NS-3 has the real packet error model. For FlowSim-first experiments, the sweep script therefore generates derived topology files that keep the topology connected, set inter-server link `error_rate` to `p`, and scale inter-server bandwidth by `(1-p)`.
+- The original topology files remain unchanged. GPU-to-NVSwitch/NVSwitch-to-GPU intra-server links are not scaled.
+- Link-removal mode remains available as `--error-model link_failure`, but it is not the default for error-probability JCT curves. In this session, link-removal generated missing FlowSim `EndToEnd.csv` for nonzero Meta points, so it is not a reliable way to produce the requested curve without deeper backend work.
+- Added two 256-GPU MoE sweep workloads:
+  - `experiments/flowsim_256/moe_256_fault_tiny.txt` for fast mechanics smoke tests.
+  - `experiments/flowsim_256/moe_256_fault_comm.txt` for useful JCT curves with larger communication sizes while keeping only 8 layers.
+- Verification:
+  - `python3 -m py_compile experiments/flowsim_256/run_fault_probability_sweep.py`
+  - Meta smoke with `moe_256_fault_tiny.txt` completed and wrote raw/summary/plot outputs.
+  - Meta smoke with `moe_256_fault_comm.txt` completed and showed JCT rising from `0.405045s` at 0% to `0.409079s` at 1%.
+  - Full `moe_256_fault_comm.txt` sweep over `Meta`, `HPN`, `DeepSeek`, `Zcube`, `RO`, and `ROFT` for 0..15% completed under `results/fault_tolerance_256_flowsim_comm/` with 96 raw rows, 96 summary rows, no missing JCT values, no empty `EndToEnd.csv`, and `jct_by_error_probability.png`.
+- Full 1837-layer Mixtral 256 MoE was not used for the full probability sweep because a single Meta 1% point exceeded 7 minutes before interruption. Treat full Mixtral probability sweeps as separate long batch runs.
+
+### 2026-06-18: Add User-Run Wrapper for Full Mixtral 256 FlowSim Sweep
+
+- Added `experiments/flowsim_256/run_full_mixtral_fault_probability_sweep.sh`.
+- The wrapper runs the full 1837-layer Mixtral 8x7B MoE 256-GPU workload through `run_fault_probability_sweep.py` rather than the 8-layer quick workloads.
+- Defaults:
+  - output root: `results/fault_tolerance_256_flowsim_full_mixtral/`
+  - topologies: `Meta,HPN,DeepSeek,Zcube,RO,ROFT`
+  - error probabilities: `0..15%`
+  - error model: `bandwidth_scale`
+  - `FLOWSIM_WRITE_FCT=0`
+  - `FLOWSIM_PROGRESS=0`
+- Rationale: full Mixtral points are long enough that the user should launch them as a resumable batch from a terminal. The wrapper avoids requiring a long Python command and makes common overrides explicit through environment variables.
+- Verification:
+  - `bash -n experiments/flowsim_256/run_full_mixtral_fault_probability_sweep.sh`
+  - `python3 -m py_compile experiments/flowsim_256/run_fault_probability_sweep.py`
+
+### 2026-06-23: Reclaim htsim Packet-Level RoCE Flow Owners With a Grace Window
+
+- Full normal 256 dense Meta htsim `spray_rr` previously failed before completing the first topology: the process retained every completed per-flow `RoceSrc/RoceSink/Route/Trigger` owner until `htsim_destroy()` and was OOM-killed around forward `180/1262`, with RSS about 518 GB.
+- Immediate or small-batch reclamation is unsafe for RoCE spray because duplicate/out-of-order packets can remain queued after the cumulative ACK completes a flow. Deleting the per-flow route endpoints too early can leave queued packets with dangling route/sink pointers and crash in `Packet::sendOn()`.
+- Decision: reclaim completed flow owners only after a large completion-count grace window. Each completed flow records a completion sequence and is eligible for deletion only after at least `HTSIM_FLOW_RECLAIM_BATCH` later completions. The default is 262144 and can be tuned through the environment.
+- Decision: `RoceSrc` owns and frees the route copies created by `set_paths()`, so `spray_rr` route vectors do not leak when a flow owner is eventually reclaimed.
+- Rationale: this keeps packet-level RoCE semantics intact, avoids adding packet refcounting to htsim internals, and bounds memory for dense workloads without deleting route endpoints still referenced by delayed packets.
+- Verification:
+  - `env PATH=/usr/bin:/bin:$PATH ./scripts/build.sh -c htsim`
+  - short dense Meta spray smoke with `/tmp/htsim_dense256_short10_1mib.txt`: exit 0, `EndToEnd.csv` 15 lines, `fct.txt` 144897 lines, maximum RSS about 390 MB.
+  - full normal dense Meta spray 300s window: timeout 124, no segfault/OOM, forward `9/1262`, `fct.txt` 36840 lines, maximum RSS about 5.0 GB, `EndToEnd.csv` empty because the workload was intentionally interrupted before completion.
 
 ## Ongoing Rule
 
