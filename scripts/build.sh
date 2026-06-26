@@ -7,6 +7,7 @@ SIMAI_DIR="${ROOT_DIR:?}"/astra-sim-alibabacloud
 SOURCE_NS3_BIN_DIR="${SIMAI_DIR:?}"/extern/network_backend/ns3-interface/simulation/build/scratch/ns3.36.1-AstraSimNetwork-debug
 SOURCE_ANA_BIN_DIR="${SIMAI_DIR:?}"/build/simai_analytical/build/simai_analytical/SimAI_analytical
 SOURCE_PHY_BIN_DIR="${SIMAI_DIR:?}"/build/simai_phy/build/simai_phynet/SimAI_phynet
+SOURCE_HTSIM_BIN_DIR="${SIMAI_DIR:?}"/build/simai_htsim/build/simai_htsim/SimAI_htsim
 
 TARGET_BIN_DIR="${SCRIPT_DIR:?}"/../bin
 function compile {
@@ -43,6 +44,15 @@ function compile {
         ./build.sh -lr analytical
         ./build.sh -c analytical 
         ln -s "${SOURCE_ANA_BIN_DIR:?}" "${TARGET_BIN_DIR:?}"/SimAI_analytical;;
+    "htsim")
+        mkdir -p "${TARGET_BIN_DIR:?}"
+        if [ -L "${TARGET_BIN_DIR:?}/SimAI_htsim" ]; then
+            rm -rf "${TARGET_BIN_DIR:?}"/SimAI_htsim
+        fi
+        cd "${SIMAI_DIR:?}"
+        ./build.sh -lr htsim
+        ./build.sh -c htsim
+        ln -s "${SOURCE_HTSIM_BIN_DIR:?}" "${TARGET_BIN_DIR:?}"/SimAI_htsim;;
     esac
 }
 
@@ -68,6 +78,12 @@ function cleanup_build {
         fi
         cd "${SIMAI_DIR:?}"
         ./build.sh -lr analytical;;
+    "htsim")
+        if [ -L "${TARGET_BIN_DIR:?}/SimAI_htsim" ]; then
+            rm -rf "${TARGET_BIN_DIR:?}"/SimAI_htsim
+        fi
+        cd "${SIMAI_DIR:?}"
+        ./build.sh -lr htsim;;
     esac
 }
 
@@ -79,7 +95,7 @@ case "$1" in
     compile "$2";;
 -h|--help|*)
     printf -- "help message\n"
-    printf -- "-c|--compile mode supported ns3/phy/analytical  (example:./build.sh -c ns3)\n"
+    printf -- "-c|--compile mode supported ns3/phy/analytical/htsim  (example:./build.sh -c ns3)\n"
     printf -- "-l|--clean  (example:./build.sh -l ns3)\n"
     printf -- "-lr|--clean-result mode  (example:./build.sh -lr ns3)\n"
 esac

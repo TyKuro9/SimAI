@@ -87,6 +87,8 @@ class Sys : public Callable {
   AstraNetworkAPI* NI;
   AstraMemoryAPI* MEM;
   int finished_workloads;
+  bool suppress_auto_delete;
+  bool workload_reported;
   int id;
   int npu_offset;
   int nvswitch_id; 
@@ -186,6 +188,7 @@ class Sys : public Callable {
 
   void register_for_finished_stream(Callable* callable);
   void increase_finished_streams(int amount);
+  void dump_unfinished_streams(size_t limit);
   void zero_latecy_register_event(
       Callable* callable,
       EventType event,
@@ -197,6 +200,7 @@ class Sys : public Callable {
       CallData* callData,
       int cycles);
   int drain_finished_streams();
+  int start_ready_streams();
   void insert_into_ready_list(BaseStream* stream);
   #ifdef PHY_MTP
   void insert_into_running_list(StreamBaseline* stream);
@@ -213,6 +217,7 @@ class Sys : public Callable {
       CallData* callData,
       Tick& cycles);
   void call_events();
+  int flush_pending_events();
   void workload_finished() {
     finished_workloads++;
   };

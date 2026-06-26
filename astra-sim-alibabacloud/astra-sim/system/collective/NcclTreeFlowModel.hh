@@ -85,7 +85,13 @@ class NcclTreeFlowModel : public Algorithm {
       int treechannels);
   virtual void run(EventType event, CallData* data);
   void process_stream_count(int channel_id);
-  void release_packets(int channel_id, int flow_id, uint64_t message_size);
+  void release_packets(
+      int channel_id,
+      int flow_id,
+      uint64_t message_size,
+      bool packet_npu_to_ma,
+      bool packet_processed,
+      bool packet_send_back);
   void reduce(int channel_id, int flow_id);
   bool iteratable(int channel_id);
   virtual int get_non_zero_latency_packets();
@@ -104,20 +110,31 @@ class NcclTreeFlowModel : public Algorithm {
   {
   public:
     inline FlowCriticalSection ()
+        : active(true)
     {
       while (g_flow_inCriticalSection.exchange (true, std::memory_order_acquire))
         ;
     }
 
+    FlowCriticalSection(const FlowCriticalSection&) = delete;
+    FlowCriticalSection& operator=(const FlowCriticalSection&) = delete;
+
     inline void ExitSection() 
     {
+      if (!active) {
+        return;
+      }
+      active = false;
         g_flow_inCriticalSection.store (false, std::memory_order_release);
     }
 
     inline ~FlowCriticalSection ()
     {
-      g_flow_inCriticalSection.store (false, std::memory_order_release);
+      ExitSection();
     }
+
+  private:
+    bool active;
   };
   static std::atomic<bool> g_flow_inCriticalSection;
 

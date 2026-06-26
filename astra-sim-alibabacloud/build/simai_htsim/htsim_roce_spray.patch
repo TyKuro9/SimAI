@@ -1,0 +1,373 @@
+diff --git a/sim/datacenter/main_roce.cpp b/sim/datacenter/main_roce.cpp
+index 17ccd02..f068548 100755
+--- a/sim/datacenter/main_roce.cpp
++++ b/sim/datacenter/main_roce.cpp
+@@ -507,9 +507,7 @@ int main(int argc, char **argv) {
+
+         ((HostQueue*)top->queues_ns_nlp[src][top->HOST_POD_SWITCH(src)][0])->addHostSender(roceSrc);
+
+-        if (route_strategy!=SINGLE_PATH && route_strategy!=ECMP_FIB){
+-            abort();
+-        } else if (route_strategy==ECMP_FIB) {
++        if (route_strategy==ECMP_FIB) {
+             Route* srctotor = new Route();
+
+             srctotor->push_back(top->queues_ns_nlp[src][top->HOST_POD_SWITCH(src)][0]);
+@@ -535,12 +533,13 @@ int main(int argc, char **argv) {
+             top->switches_lp[top->HOST_POD_SWITCH(dest)]->addHostPort(dest,roceSrc->flow_id(),roceSnk);
+         } else {
+             int choice = rand()%net_paths[src][dest]->size();
+-            routeout = new Route(*(net_paths[src][dest]->at(choice)));
+-            routeout->add_endpoints(roceSrc, roceSnk);
++            routeout = new Route(*(net_paths[src][dest]->at(choice)), *roceSnk);
+
+-            routein = new Route(*top->get_bidir_paths(dest,src,false)->at(choice));
+-            routein->add_endpoints(roceSnk, roceSrc);
++            routein = new Route(*top->get_bidir_paths(dest,src,false)->at(choice), *roceSrc);
+             roceSrc->connect(routeout, routein, *roceSnk, timeFromUs((uint32_t)rand()%20));
++            if (route_strategy != SINGLE_PATH) {
++                roceSrc->set_paths(net_paths[src][dest]);
++            }
+         }
+
+         path_refcounts[src][dest]--;
+diff --git a/sim/roce.cpp b/sim/roce.cpp
+index ba82072..91bc950 100755
+--- a/sim/roce.cpp
++++ b/sim/roce.cpp
+@@ -9,6 +9,14 @@
+ #include "trigger.h"
+ using namespace std;
+
++static bool roce_verbose_logging() {
++    static bool enabled = []() {
++        const char* value = getenv("HTSIM_ROCE_VERBOSE");
++        return value && value[0] != '\0' && value[0] != '0';
++    }();
++    return enabled;
++}
++
+ ////////////////////////////////////////////////////////////////
+ //  ROCE SOURCE
+ ////////////////////////////////////////////////////////////////
+@@ -52,6 +60,16 @@ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventl
+
+     _sink = 0;
+     _done = false;
++    _crt_path = 0;
++    _route_strategy = ROCE_ROUTE_INCREMENTAL;
++    _active_path = 0;
++    _last_path = 0;
++    _route_rng_state =
++        0x9e3779b9U ^ (_node_num * 2654435761U) ^ ((uint32_t)get_id() << 1);
++    _plb_congested_rounds = 0;
++    _plb_delivered = 0;
++    _plb_congested = 0;
++    _plb_next_round = 0;
+
+     _rtt = 0;
+     _rto = timeFromMs(20);
+@@ -77,6 +95,13 @@ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventl
+     _packet_spacing = (simtime_picosec)((Packet::data_packet_size()+RocePacket::ACKSIZE) * (pow(10.0,12.0) * 8) / _bitrate);
+ }
+
++RoceSrc::~RoceSrc() {
++    for (Route* route : _paths) {
++        delete route;
++    }
++    _paths.clear();
++}
++
+ /*mem_b RoceSrc::queuesize(){
+   return 0;
+   }
+@@ -89,6 +114,18 @@ void RoceSrc::set_traffic_logger(TrafficLogger* pktlogger) {
+     _flow.set_logger(pktlogger);
+ }
+
++void RoceSrc::set_route_strategy(RouteStrategy strategy) {
++    _route_strategy = strategy;
++    _crt_path = 0;
++    _active_path = 0;
++    _last_path = 0;
++    _plb_congested_rounds = 0;
++    _plb_delivered = 0;
++    _plb_congested = 0;
++    _plb_next_round = 0;
++    _reps_good_paths.clear();
++}
++
+ void RoceSrc::log_me() {
+     // avoid looping
+     if (_log_me == true)
+@@ -101,7 +138,9 @@ void RoceSrc::log_me() {
+ }
+
+ void RoceSrc::startflow(){
+-    cout << "startflow " << _flow._name << " at " << timeAsUs(eventlist().now()) << endl;
++    if (roce_verbose_logging()) {
++        cout << "startflow " << _flow._name << " at " << timeAsUs(eventlist().now()) << endl;
++    }
+     _flow_started = true;
+     _highest_sent = 0;
+     _last_acked = 0;
+@@ -133,6 +172,119 @@ void RoceSrc::connect(Route* routeout, Route* routeback, RoceSink& sink, simtime
+     //else cout << "TRIGGER START " << _nodename << endl;
+ }
+
++void RoceSrc::set_paths(vector<const Route*>* rt_list) {
++    assert(_sink);
++    assert(rt_list);
++    assert(rt_list->size() > 0);
++
++    for (Route* route : _paths) {
++        delete route;
++    }
++    _paths.clear();
++    _paths.reserve(rt_list->size());
++
++    for (size_t i = 0; i < rt_list->size(); i++) {
++        Route* tmp = new Route(*(rt_list->at(i)), *_sink);
++        tmp->add_endpoints(this, _sink);
++        tmp->set_path_id(i, rt_list->size());
++        _paths.push_back(tmp);
++    }
++    _crt_path = 0;
++    _active_path %= _paths.size();
++}
++
++const Route* RoceSrc::choose_route() {
++    if (_paths.empty()) {
++        return _route;
++    }
++
++    uint32_t choice = 0;
++    switch (_route_strategy) {
++    case ROCE_ROUTE_OBLIVIOUS:
++        choice = random_path_index();
++        break;
++    case ROCE_ROUTE_PLB:
++        if (_plb_congested_rounds > 0) {
++            _active_path = random_path_index();
++            _plb_congested_rounds = 0;
++            _plb_delivered = 0;
++            _plb_congested = 0;
++        }
++        choice = _active_path % _paths.size();
++        break;
++    case ROCE_ROUTE_REPS:
++        if (_packets_sent < _paths.size()) {
++            choice = _crt_path % _paths.size();
++            _crt_path = (_crt_path + 1) % _paths.size();
++        } else if (!_reps_good_paths.empty()) {
++            choice = _reps_good_paths.front() % _paths.size();
++            _reps_good_paths.pop_front();
++            _reps_good_paths.push_back(choice);
++        } else {
++            choice = random_path_index();
++        }
++        break;
++    case ROCE_ROUTE_INCREMENTAL:
++    default:
++        choice = _crt_path % _paths.size();
++        _crt_path = (_crt_path + 1) % _paths.size();
++        break;
++    }
++    _last_path = choice;
++    return _paths.at(choice);
++}
++
++uint32_t RoceSrc::random_path_index() {
++    if (_paths.empty()) {
++        return 0;
++    }
++    if (_route_rng_state == 0) {
++        _route_rng_state = 0x9e3779b9U ^ (_node_num * 2654435761U);
++    }
++    _route_rng_state ^= _route_rng_state << 13;
++    _route_rng_state ^= _route_rng_state >> 17;
++    _route_rng_state ^= _route_rng_state << 5;
++    return _route_rng_state % _paths.size();
++}
++
++void RoceSrc::add_reps_good_path(uint32_t path_id) {
++    if (_paths.empty()) {
++        return;
++    }
++    path_id %= _paths.size();
++    const size_t max_entries = min<size_t>(_paths.size() * 4, 64);
++    _reps_good_paths.push_back(path_id);
++    while (_reps_good_paths.size() > max_entries) {
++        _reps_good_paths.pop_front();
++    }
++}
++
++void RoceSrc::record_path_feedback(bool good) {
++    if (_paths.empty()) {
++        return;
++    }
++    if (_route_strategy == ROCE_ROUTE_REPS && good) {
++        add_reps_good_path(_last_path);
++    }
++    if (_route_strategy == ROCE_ROUTE_PLB) {
++        _plb_delivered++;
++        if (!good) {
++            _plb_congested++;
++        }
++        if (_base_rtt > 0 && _base_rtt != timeInf &&
++            eventlist().now() >= _plb_next_round) {
++            if (_plb_congested * 4 > _plb_delivered) {
++                _plb_congested_rounds++;
++            } else {
++                _plb_congested_rounds = 0;
++            }
++            _plb_delivered = 0;
++            _plb_congested = 0;
++            _plb_next_round = eventlist().now() + _base_rtt;
++        }
++    }
++}
++
+ /* Process a NACK.  Generally this involves queuing the NACKed packet
+    for retransmission, but then waiting for a PULL to actually resend
+    it.  However, sometimes the NACK has the PULL bit set, and then we
+@@ -140,6 +292,7 @@ void RoceSrc::connect(Route* routeout, Route* routeback, RoceSink& sink, simtime
+ void RoceSrc::processNack(const RoceNack& nack){
+     _last_acked = nack.ackno();
+     _rtx_packets_sent += _highest_sent - _last_acked;
++    record_path_feedback(false);
+
+     if (_log_me)
+         cout << "Src " << get_id() << " go back n from " <<  _highest_sent << " to " << _last_acked << " at " << timeAsUs(eventlist().now()) << " us" << endl;
+@@ -164,6 +317,7 @@ void RoceSrc::processAck(const RoceAck& ack) {
+
+     // Compute rtt.  This comes originally from TCP, and may not be optimal for ROCE */
+     uint64_t m = eventlist().now()-ts;
++    simtime_picosec previous_base_rtt = _base_rtt;
+
+     if (m!=0){
+         if (_rtt>0){
+@@ -194,13 +348,21 @@ void RoceSrc::processAck(const RoceAck& ack) {
+         // the cumulative ack, but we'll get an ACK or NACK anyway in
+         // due course.
+         _last_acked = ackno;
++        bool good_path = true;
++        if (previous_base_rtt > 0 && previous_base_rtt != timeInf &&
++            m > previous_base_rtt + previous_base_rtt / 4) {
++            good_path = false;
++        }
++        record_path_feedback(good_path);
+     }
+     if (_logger) _logger->logRoce(*this, RoceLogger::ROCE_RCV);
+
+     if (_log_me)
+         cout << "Src " << get_id() << " ackno " << ackno << endl;
+     if (ackno >= _flow_size){
+-        cout << "Flow " << _name << " " << get_id() << " finished at " << timeAsUs(eventlist().now()) << " total bytes " << ackno << endl;
++        if (roce_verbose_logging()) {
++            cout << "Flow " << _name << " " << get_id() << " finished at " << timeAsUs(eventlist().now()) << " total bytes " << ackno << endl;
++        }
+         _done = true;
+         if (_end_trigger) {
+             _end_trigger->activate();
+@@ -238,8 +400,10 @@ void RoceSrc::receivePacket(Packet& pkt)
+         _stop_time = 0;
+     }
+
+-    if (_done)
++    if (_done) {
++        pkt.free();
+         return;
++    }
+
+     switch (pkt.type()) {
+     case ETH_PAUSE:
+@@ -283,10 +447,11 @@ void RoceSrc::send_packet() {
+         }
+     }
+
+-    p = RocePacket::newpkt(_flow, *_route, _highest_sent+1, _mss, false, last_packet,_dstaddr);
++    const Route* route = choose_route();
++    p = RocePacket::newpkt(_flow, *route, _highest_sent+1, _mss, false, last_packet,_dstaddr);
+
+     assert(p);
+-    p->set_pathid(_pathid);
++    p->set_pathid(route->path_id() >= 0 ? route->path_id() : _last_path);
+
+     p->flow().logTraffic(*p,*this,TrafficLogger::PKT_CREATESEND);
+     p->set_ts(eventlist().now());
+@@ -446,7 +611,3 @@ void RoceSink::send_nack(simtime_picosec ts, RocePacket::seq_t ackno) {
+     nack->set_ts(ts);
+     nack->sendOn();
+ }
+-
+-
+-
+-
+diff --git a/sim/roce.h b/sim/roce.h
+index 4796dda..154218e 100755
+--- a/sim/roce.h
++++ b/sim/roce.h
+@@ -10,6 +10,8 @@
+
+ #include <list>
+ #include <map>
++#include <deque>
++#include <vector>
+ //#include "util.h"
+ #include "math.h"
+ #include "config.h"
+@@ -33,6 +35,7 @@ class RoceSrc : public BaseQueue, public TriggerTarget {
+     friend class RoceSink;
+ public:
+     RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventlist, linkspeed_bps rate);
++    ~RoceSrc();
+
+     virtual void connect(Route* routeout, Route* routeback, RoceSink& sink, simtime_picosec startTime);
+     void set_dst(uint32_t dst) {_dstaddr = dst;}
+@@ -67,6 +70,15 @@ public:
+     virtual void receivePacket(Packet& pkt);
+
+     virtual void setPath(uint32_t p) {_pathid = p;}
++    enum RouteStrategy {
++        ROCE_ROUTE_INCREMENTAL,
++        ROCE_ROUTE_OBLIVIOUS,
++        ROCE_ROUTE_PLB,
++        ROCE_ROUTE_REPS
++    };
++    void set_route_strategy(RouteStrategy strategy);
++    void set_paths(vector<const Route*>* rt_list);
++    const Route* choose_route();
+
+     virtual void processPause(const EthPausePacket& pkt);
+     virtual void processAck(const RoceAck& ack);
+@@ -102,10 +114,24 @@ public:
+     RoceSink* _sink;
+
+     const Route* _route;
++    vector<Route*> _paths;
++    uint32_t _crt_path;
++    RouteStrategy _route_strategy;
++    uint32_t _active_path;
++    uint32_t _last_path;
++    uint32_t _route_rng_state;
++    uint32_t _plb_congested_rounds;
++    uint32_t _plb_delivered;
++    uint32_t _plb_congested;
++    simtime_picosec _plb_next_round;
++    deque<uint32_t> _reps_good_paths;
+     bool _flow_started;
+     uint16_t _state_send;
+
+     void send_packet();
++    uint32_t random_path_index();
++    void record_path_feedback(bool good);
++    void add_reps_good_path(uint32_t path_id);
+
+     virtual const string& nodename() { return _nodename; }
+     inline uint32_t flow_id() const { return _flow.flow_id();}
+@@ -192,4 +218,3 @@ private:
+
+
+ #endif
+-

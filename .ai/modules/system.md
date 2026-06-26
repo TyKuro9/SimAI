@@ -45,7 +45,7 @@
 ## NS-3 Notes
 
 - NS-3 keeps raw `Sys*` entries in its entrypoint `systems` vector after `Simulator::Run()`, so `Sys::call_events()` must not self-delete under `NS3_MTP`/`NS3_MPI`.
-- `drain_finished_streams()` completes active streams with exhausted `phases_to_go` through `proceed_to_next_vnet_baseline()`, preserving normal dataset notifier and workload reporting semantics.
+- `drain_finished_streams()` completes active `Ready`, `Executing`, or `Zombie` streams with exhausted `phases_to_go` through `proceed_to_next_vnet_baseline()`, preserving normal dataset notifier and workload reporting semantics. This matters after backend event queues empty: a final stream can be logically complete without first becoming `Zombie`.
 - MockNCCL group/comm initialization should use workload `pipeline_model_parallelism` and `all_gpus` when deriving DP/EP sizes. `total_nodes` may include NVSwitches and is not a valid DP-size denominator for MoE group construction.
 - Empty or null `NcclTreeFlowModel` flow models are disabled so they do not create active streams with no usable packets/channels.
 

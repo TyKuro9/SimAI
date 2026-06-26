@@ -1,5 +1,6 @@
 set(use_rdma ${USE_RDMA})
 set(use_analytical ${USE_ANALYTICAL})
+set(use_htsim ${USE_HTSIM})
 file(GLOB astra_SRC 
 	"${PROJECT_SOURCE_DIR}/../../astra-sim/system/collective/*.cc"
 	"${PROJECT_SOURCE_DIR}/../../astra-sim/system/fast-backend/*.cc"
@@ -33,8 +34,14 @@ elseif(use_analytical)
 	list(FILTER HEADERS EXCLUDE REGEX "${PROJECT_SOURCE_DIR}/../../astra-sim/system/PhyMultiThread.hh")
 	list(FILTER astra_SRC EXCLUDE REGEX "${PROJECT_SOURCE_DIR}/../../astra-sim/system/PhyMultiThread.cc")
 	add_definitions(-DANALYTI)
+elseif(use_htsim)
+	list(FILTER HEADERS EXCLUDE  REGEX ".*SimAiFlowModelRdma.hh")
+	list(FILTER astra_SRC EXCLUDE REGEX ".*SimAiFlowModelRdma.cc")
+	list(FILTER HEADERS EXCLUDE REGEX "${PROJECT_SOURCE_DIR}/../../astra-sim/system/BootStrapnet.hh")
+	list(FILTER astra_SRC EXCLUDE REGEX "${PROJECT_SOURCE_DIR}/../../astra-sim/system/BootStrapnet.cc")
+	list(FILTER HEADERS EXCLUDE REGEX "${PROJECT_SOURCE_DIR}/../../astra-sim/system/PhyMultiThread.hh")
+	list(FILTER astra_SRC EXCLUDE REGEX "${PROJECT_SOURCE_DIR}/../../astra-sim/system/PhyMultiThread.cc")
 endif()
 include_directories("${PROJECT_SOURCE_DIR}/../../")
 add_library(AstraSim ${astra_SRC})
 set_property(TARGET AstraSim PROPERTY CXX_STANDARD 11)
-

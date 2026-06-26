@@ -75,6 +75,12 @@ void PacketBundle::send_to_NPU() {
 void PacketBundle::call(EventType event, CallData* data) {
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
   NcclLog->writeLog(NcclLogLevel::DEBUG,"packet bundle call");
+#if defined(HTSIM_BACKEND) || defined(NS3_MTP) || defined(NS3_MPI)
+  if (stream == nullptr || stream->state == StreamState::Dead) {
+    delete this;
+    return;
+  }
+#endif
   if (needs_processing == true) {
     needs_processing = false;
     this->delay = generator->mem_write(size) + generator->mem_read(size) +

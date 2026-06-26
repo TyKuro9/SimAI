@@ -25,6 +25,7 @@ RecvPacketEventHadndlerData::RecvPacketEventHadndlerData(
     EventType event,
     AstraSim::ncclFlowTag _flowTag)
     : BasicEventHandlerData(owner->owner, event) {
+  this->owner = owner;
   this->flowTag = _flowTag;
 }
 
