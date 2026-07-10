@@ -30,6 +30,8 @@
 - `HTSIM_WATCHDOG_EVENTS=<N>` to print htsim flow/event state every N processed htsim events. Pair with `HTSIM_WATCHDOG_DUMP_ASTRA=1`, `HTSIM_WATCHDOG_ASTRA_RANKS=<N>`, and `HTSIM_WATCHDOG_ASTRA_STREAMS=<N>` to dump unfinished ASTRA stream snapshots.
 - `HTSIM_ROCE_TAIL_RTO=0|1` to override the default tail-loss RTO recovery setting. The default is enabled only for `ns3_ecmp`.
 - `HTSIM_ROCE_MIN_RTO_US=<us>` to override the default minimum RTO used by the `ns3_ecmp` tail recovery path; the current default for `ns3_ecmp` is 100us, but the conservative tail recovery uses adaptive `_rto` lower-bounded by that value.
+- `HTSIM_FINAL_DRAIN_RECOVERY=0|1` to disable/enable final-drain-only oldest-unacked recovery; default is enabled.
+- `HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS=<N>` to bound ACK-gated final-drain recovery rounds; default is 32768.
 
 ## Current Implementation Notes
 
@@ -54,6 +56,7 @@
 - htsim native `datacenter/htsim_roce` now accepts multi-path strategies such as `-strat perm` for RoCE instead of aborting.
 - ACK/NACK packets still use the stable reverse route configured on the sink.
 - `ns3_ecmp` also enables htsim RoCE tail RTO recovery by default. This compensates for htsim RoCE's lack of a real timeout path when a final/tail packet is dropped and no later packet exists to trigger a sink NACK. This is deliberately scoped to `ns3_ecmp` unless overridden by `HTSIM_ROCE_TAIL_RTO`.
+- `spray_plb` formal runs keep `HTSIM_ROCE_TAIL_RTO=0`. If final ASTRA streams remain after the normal event queue drains, `HtsimAstra` invokes `RoceSrc::recover_oldest_unacked()` once per unfinished flow and drains all resulting packet/ACK events before another recovery round. The recovery packet does not rewind `_highest_sent`, so normal traffic never retransmits the complete unacknowledged suffix because of this mechanism.
 - These PLB/REPS strategies borrow the entropy/path-selection shape from the REPS EuroSys artifact but are implemented on the existing htsim RoCE source-route model. They are source-side approximations, not Tomahawk5 switch-port DLB.
 
 ## Inputs
@@ -146,6 +149,11 @@
   - `env PATH=/usr/bin:/bin:$PATH ./scripts/build.sh -c htsim` completed.
   - `timeout 180s env HTSIM_DISABLE_FCT_OUTPUT=1 bin/SimAI_htsim -w /tmp/htsim_dense256_short10_1mib.txt -n mytopo/Meta_Topo_256g_8gps_400Gbps_A100 -c myconfig/Meta256MoE.conf -o experiments/htsim_results/csv/ns3_ecmp_short10_1mib_nofct_20260702_codex -r ns3_ecmp`
   - result: exit 0, log contains `[htsim] fct output disabled by HTSIM_DISABLE_FCT_OUTPUT`, `EndToEnd.csv` has 15 lines, and no `fct.txt` was created.
+- Final-drain oldest-unacked recovery verification on 2026-07-10:
+  - 256 Meta 64 MiB-tail reproducer completed with tail RTO disabled, exit 0, 12-line `EndToEnd.csv`, 58881-line `fct.txt`, 808 ACK-gated recovery rounds, wall 32.09s, and maximum RSS about 386 MB.
+  - 256 and 1024 1 MiB scale-table smokes both exited 0 without invoking recovery. They wrote 28673 and 114689 FCT lines respectively; wall times were 3.59s and 32.03s.
+  - The uncapped first-10-layer diagnostic reached final recovery round 1706 and grew from about 122k to 124083 FCT rows during the bounded foreground test. It was intentionally interrupted before full completion; this validates ongoing progress but not a completed large-message result.
+  - Formal runner: `experiments/htsim_results/run_dense_scale_table_spray_plb.sh`; output root: `experiments/htsim_results/csv/htsim_dense_scale_table_spray_plb_final_recovery_20260710_191503`.
 - htsim `ns3_ecmp` tail-stall diagnostics on 2026-07-06:
   - Added diagnostic helpers under `experiments/cross_backend_dense256_meta_20260624_114003/`: `make_htsim_repro_workloads.py` and `run_htsim_ns3_ecmp_diagnostics.sh`.
   - `dense256_cap256m_core7` is the compact reproducer: old `ecmp` exits 0 with 12 rows and `all passes finished at time: 54483474`; original `ns3_ecmp` times out after 420s with 0 rows.

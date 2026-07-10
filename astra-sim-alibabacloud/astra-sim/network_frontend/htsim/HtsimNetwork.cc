@@ -1200,6 +1200,26 @@ bool schedule_roce_packet_flow(
 
 }  // namespace
 
+size_t htsim_recover_stalled_flows(size_t limit) {
+  if (!packet_level_enabled) {
+    return 0;
+  }
+
+  size_t recovered = 0;
+  for (const auto& flow : owned_flows) {
+    if (flow == nullptr || flow->done || flow->src == nullptr) {
+      continue;
+    }
+    if (flow->src->recover_oldest_unacked()) {
+      recovered++;
+      if (limit > 0 && recovered >= limit) {
+        break;
+      }
+    }
+  }
+  return recovered;
+}
+
 void htsim_dump_pending_state(size_t limit) {
   cerr << "[htsim debug] pending maps sentHash=" << sentHash.size()
        << " recvHash=" << recvHash.size()

@@ -225,6 +225,15 @@
   - Both logs contain `workload stats for the job scheduled` and `all passes finished`.
 - Decision: for NS-3 CSV/reporting regressions, use the dense tiny case first and the MoE backward all-to-all tiny case second before escalating to expensive 256-GPU full-topology runs.
 
+### 2026-07-10: Restrict HTSim Spray Tail Recovery to Final Drain
+
+- Kept `HTSIM_ROCE_TAIL_RTO=0` for formal `spray_plb` runs because adaptive tail RTO can rewind and retransmit the full unacknowledged suffix while normal congestion is still active.
+- Added `RoceSrc::recover_oldest_unacked()` and a final-drain recovery loop in `HtsimAstra.cc`. Recovery starts only when ASTRA cannot drain, schedule, start, or flush any more work and the HTSim event queue is empty.
+- Each round sends one retransmission from every unfinished flow's cumulative ACK position, drains all resulting HTSim events, and then reassesses progress. It does not change the normal `_highest_sent` cursor.
+- Default recovery is enabled with a 32768-round cap. Progress logging is sparse: first round, every 256 rounds, and whenever the unfinished-flow count changes.
+- Verification: the 256 Meta 64 MiB-tail reproducer exited 0 in 32.09s with 58881 FCT lines after 808 recovery rounds; independent 256/1024 1 MiB smokes exited 0 without recovery.
+- The formal 12-case 256/1024 Dense `spray_plb` FCT batch runs sequentially in tmux session `htsim_dense_scale_plb_fct_final_20260710`, output root `experiments/htsim_results/csv/htsim_dense_scale_table_spray_plb_final_recovery_20260710_191503`.
+
 ## Ongoing Rule
 
 After each future development change, update:

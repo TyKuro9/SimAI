@@ -63,6 +63,17 @@ bool env_enabled(const char* name) {
   return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+bool env_enabled_or_default(const char* name, bool default_value) {
+  const char* value = getenv(name);
+  if (value == nullptr || value[0] == '\0') {
+    return default_value;
+  }
+  string token(value);
+  transform(token.begin(), token.end(), token.begin(), ::tolower);
+  return token != "0" && token != "false" && token != "no" &&
+      token != "off";
+}
+
 size_t env_size_or_default(const char* name, size_t default_value) {
   const char* value = getenv(name);
   if (value == nullptr || value[0] == '\0') {
@@ -299,6 +310,12 @@ int main(int argc, char* argv[]) {
   int started_streams = 0;
   int flushed_events = 0;
   bool final_drain_failed = false;
+  const bool final_drain_recovery =
+      env_enabled_or_default("HTSIM_FINAL_DRAIN_RECOVERY", true);
+  const size_t max_final_drain_recovery_rounds =
+      env_size_or_default("HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS", 32768);
+  size_t final_drain_recovery_round = 0;
+  size_t previous_recovered_flows = 0;
   while (!rank0_reported()) {
     drained_streams = 0;
     scheduled_streams = 0;
@@ -350,12 +367,34 @@ int main(int argc, char* argv[]) {
     }
     if (drained_streams == 0 && scheduled_streams == 0 &&
         started_streams == 0 && flushed_events == 0) {
+      if (final_drain_recovery &&
+          final_drain_recovery_round < max_final_drain_recovery_rounds) {
+        size_t recovered_flows = htsim_recover_stalled_flows();
+        if (recovered_flows > 0) {
+          final_drain_recovery_round++;
+          if (final_drain_recovery_round == 1 ||
+              final_drain_recovery_round % 256 == 0 ||
+              recovered_flows != previous_recovered_flows) {
+            cout << "[htsim] Final drain recovery round "
+                 << final_drain_recovery_round << " recovered_flows="
+                 << recovered_flows << endl;
+          }
+          previous_recovered_flows = recovered_flows;
+          htsim_run(dump_astra_watchdog);
+          continue;
+        }
+      }
       cerr << "[htsim] Final drain stalled before workload report" << endl;
       htsim_dump_pending_state(32);
       dump_unfinished_astra(32, 8);
       final_drain_failed = true;
       break;
     }
+  }
+
+  if (final_drain_recovery_round > 0) {
+    cout << "[htsim] Final drain recovery completed after "
+         << final_drain_recovery_round << " rounds" << endl;
   }
 
   htsim_destroy();

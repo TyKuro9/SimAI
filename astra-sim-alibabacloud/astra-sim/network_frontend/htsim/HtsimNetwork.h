@@ -82,6 +82,7 @@ void htsim_run(const std::function<void()>& watchdog_callback = nullptr);
 void htsim_stop();
 void htsim_destroy();
 void htsim_dump_pending_state(std::size_t limit = 16);
+std::size_t htsim_recover_stalled_flows(std::size_t limit = 0);
 
 extern std::map<std::pair<std::pair<int, int>, int>, AstraSim::ncclFlowTag>
     receiver_pending_queue;

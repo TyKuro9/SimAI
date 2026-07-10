@@ -32,7 +32,7 @@ index 17ccd02..f068548 100755
  
          path_refcounts[src][dest]--;
 diff --git a/sim/roce.cpp b/sim/roce.cpp
-index ba82072..a7ab40b 100755
+index ba82072..e693ca5 100755
 --- a/sim/roce.cpp
 +++ b/sim/roce.cpp
 @@ -9,6 +9,14 @@
@@ -318,7 +318,35 @@ index ba82072..a7ab40b 100755
  
      p->flow().logTraffic(*p,*this,TrafficLogger::PKT_CREATESEND);
      p->set_ts(eventlist().now());
-@@ -309,6 +479,9 @@ void RoceSrc::doNextEvent() {
+@@ -305,3 +475,27 @@ void RoceSrc::send_packet() {
++bool RoceSrc::recover_oldest_unacked() {
++    if (!_flow_started || _done || _sink == NULL || _flow_size == 0 ||
++        _last_acked >= _flow_size) {
++        return false;
++    }
++
++    const uint64_t remaining = _flow_size - _last_acked;
++    const uint16_t packet_size = static_cast<uint16_t>(min<uint64_t>(_mss, remaining));
++    const uint64_t seqno = _last_acked + 1;
++    const bool last_packet = packet_size == remaining;
++    const Route* route = choose_route();
++    RocePacket* packet = RocePacket::newpkt(
++        _flow, *route, seqno, packet_size, true, last_packet, _dstaddr);
++    assert(packet);
++    packet->set_pathid(route->path_id() >= 0 ? route->path_id() : _last_path);
++    packet->flow().logTraffic(
++        *packet, *this, TrafficLogger::PKT_CREATESEND);
++    packet->set_ts(eventlist().now());
++    _packets_sent++;
++    _rtx_packets_sent += packet_size;
++    packet->sendOn();
++    return true;
++}
++
+ void RoceSrc::doNextEvent() {
+     /*if (!_flow_started){
+       startflow();
+@@ -309,6 +503,9 @@ void RoceSrc::doNextEvent() {
        }*/
  
      assert(_flow_started);
@@ -328,7 +356,7 @@ index ba82072..a7ab40b 100755
      if (_log_me) 
          cout << "Src " << get_id() << " do next event\n";
          
-@@ -319,6 +492,27 @@ void RoceSrc::doNextEvent() {
+@@ -319,6 +516,27 @@ void RoceSrc::doNextEvent() {
          return;
      }
  
@@ -356,7 +384,7 @@ index ba82072..a7ab40b 100755
      if (_flow_size && _highest_sent >= _flow_size) { 
          if (_log_me) 
              cout << "Src " << get_id()  << " stopping send coz highest_sent is " << _highest_sent << endl;
-@@ -446,7 +640,3 @@ void RoceSink::send_nack(simtime_picosec ts, RocePacket::seq_t ackno) {
+@@ -446,7 +664,3 @@ void RoceSink::send_nack(simtime_picosec ts, RocePacket::seq_t ackno) {
      nack->set_ts(ts);
      nack->sendOn();
  }
@@ -365,7 +393,7 @@ index ba82072..a7ab40b 100755
 -
 -
 diff --git a/sim/roce.h b/sim/roce.h
-index 4796dda..a4c57b2 100755
+index 4796dda..b42a9dc 100755
 --- a/sim/roce.h
 +++ b/sim/roce.h
 @@ -10,6 +10,8 @@
@@ -409,7 +437,7 @@ index 4796dda..a4c57b2 100755
  
      virtual void processPause(const EthPausePacket& pkt);
      virtual void processAck(const RoceAck& ack);
-@@ -102,10 +115,24 @@ public:
+@@ -102,10 +115,25 @@ public:
      RoceSink* _sink;
   
      const Route* _route;
@@ -428,13 +456,14 @@ index 4796dda..a4c57b2 100755
      uint16_t _state_send;
  
      void send_packet();
++    bool recover_oldest_unacked();
 +    uint32_t random_path_index();
 +    void record_path_feedback(bool good);
 +    void add_reps_good_path(uint32_t path_id);
  
      virtual const string& nodename() { return _nodename; }
      inline uint32_t flow_id() const { return _flow.flow_id();}
-@@ -117,6 +144,7 @@ public:
+@@ -117,6 +145,7 @@ public:
      static uint32_t _global_node_count; 
      static uint32_t _global_rto_count;  // keep track of the total number of timeouts across all srcs
      static simtime_picosec _min_rto;
@@ -442,7 +471,7 @@ index 4796dda..a4c57b2 100755
  
      PacketFlow _flow;
  
-@@ -138,6 +166,7 @@ private:
+@@ -138,6 +167,7 @@ private:
      simtime_picosec _stop_time;
      simtime_picosec _packet_spacing;
      simtime_picosec _time_last_sent;
@@ -450,7 +479,7 @@ index 4796dda..a4c57b2 100755
      bool _done;
  };
  
-@@ -192,4 +221,3 @@ private:
+@@ -192,4 +222,3 @@ private:
  
  
  #endif
