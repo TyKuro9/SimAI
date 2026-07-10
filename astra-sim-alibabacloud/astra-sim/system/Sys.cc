@@ -2012,6 +2012,20 @@ int Sys::start_ready_streams() {
   }
   return 0;
 }
+
+int Sys::schedule_ready_list_streams() {
+  int scheduled = 0;
+  while (!ready_list.empty()) {
+    size_t before = ready_list.size();
+    schedule(1);
+    if (ready_list.size() >= before) {
+      break;
+    }
+    scheduled++;
+  }
+  return scheduled;
+}
+
 void Sys::exiting() {}
 void Sys::insert_stream(std::list<BaseStream*>* queue, BaseStream* baseStream) {
   std::list<BaseStream*>::iterator it = queue->begin();
@@ -2129,6 +2143,21 @@ static const char* stream_state_name(StreamState state) {
       return "Dead";
   }
   return "Unknown";
+}
+
+size_t Sys::unfinished_stream_count() {
+  size_t count = ready_list.size() + event_queue.size() + pending_sends.size();
+  for (const auto& queue_entry : active_Streams) {
+    for (BaseStream* stream : queue_entry.second) {
+      if (stream != nullptr && stream->state != StreamState::Dead) {
+        count++;
+      }
+    }
+  }
+  if (streams_injected > streams_finished) {
+    count += streams_injected - streams_finished;
+  }
+  return count;
 }
 
 void Sys::dump_unfinished_streams(size_t limit) {

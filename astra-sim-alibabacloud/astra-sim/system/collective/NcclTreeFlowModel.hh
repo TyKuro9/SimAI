@@ -95,6 +95,13 @@ class NcclTreeFlowModel : public Algorithm {
   void reduce(int channel_id, int flow_id);
   bool iteratable(int channel_id);
   virtual int get_non_zero_latency_packets();
+  int tag_id_for_flow(
+      const MockNccl::SingleFlow& flow_model,
+      bool receive) const;
+  int tag_id_for_receive_from(
+      const MockNccl::SingleFlow& flow_model,
+      int recv_prev) const;
+  std::vector<int> acceptable_flow_ids_for_channel(int channel_id) const;
   void insert_packets(int channel_id, int flow_id);
   void init_indegree_mapping();
   bool ready(int channel_id, int flow_id);

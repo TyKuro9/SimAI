@@ -19,13 +19,17 @@
 
 - `./scripts/build.sh -c htsim`
 - `bin/SimAI_htsim`
-- `bin/SimAI_htsim -w <workload> -n <topology> -c <config> -o <result-dir> -r single|ecmp|spray_rr|spray_incremental|spray_oblivious|spray_plb|spray_reps`
-- `HTSIM_ROUTE_STRATEGY=single|ecmp|spray_rr|spray_incremental|spray_oblivious|spray_plb|spray_reps`
+- `bin/SimAI_htsim -w <workload> -n <topology> -c <config> -o <result-dir> -r single|ecmp|ns3_ecmp|spray_rr|spray_incremental|spray_oblivious|spray_plb|spray_reps`
+- `HTSIM_ROUTE_STRATEGY=single|ecmp|ns3_ecmp|spray_rr|spray_incremental|spray_oblivious|spray_plb|spray_reps`
 - `HTSIM_LINK_BW_GBPS=<gbps>` for the ASTRA-facing htsim completion estimator.
 - `HTSIM_FLOW_LEVEL=1` to force the legacy flow-level completion estimator.
 - `HTSIM_MAX_PATHS=<N>` to cap shortest-path route enumeration for packet-level ECMP/Spray; default is 16.
 - `HTSIM_FLOW_RECLAIM_BATCH=<N>` to tune completed packet-level RoCE flow owner reclamation. The default is 262144 completed flows of grace before an individual completed flow can be freed.
 - `HTSIM_ROCE_VERBOSE=1` to re-enable native htsim RoCE per-flow start/finish stdout.
+- `HTSIM_DISABLE_FCT_OUTPUT=1` to skip `fct.txt` creation while preserving htsim flow-completion callbacks and `EndToEnd.csv` reporting.
+- `HTSIM_WATCHDOG_EVENTS=<N>` to print htsim flow/event state every N processed htsim events. Pair with `HTSIM_WATCHDOG_DUMP_ASTRA=1`, `HTSIM_WATCHDOG_ASTRA_RANKS=<N>`, and `HTSIM_WATCHDOG_ASTRA_STREAMS=<N>` to dump unfinished ASTRA stream snapshots.
+- `HTSIM_ROCE_TAIL_RTO=0|1` to override the default tail-loss RTO recovery setting. The default is enabled only for `ns3_ecmp`.
+- `HTSIM_ROCE_MIN_RTO_US=<us>` to override the default minimum RTO used by the `ns3_ecmp` tail recovery path; the current default for `ns3_ecmp` is 100us, but the conservative tail recovery uses adaptive `_rto` lower-bounded by that value.
 
 ## Current Implementation Notes
 
@@ -41,6 +45,7 @@
 - Route strategies:
   - `single`: first shortest path for each flow.
   - `ecmp`: one deterministic hash-selected shortest path per flow.
+  - `ns3_ecmp`: source-routed approximation of NS-3 switch-side ECMP; each flow builds a shortest forward route by hashing the flow key independently at each hop over next hops that move closer to the destination. ACK/NACK return traffic uses a stable reverse shortest path rather than a second independently hashed per-hop path.
   - `spray_rr`: deterministic round-robin over the cached shortest-path set for data packets.
   - `spray_incremental`: explicit alias for deterministic round-robin/incremental packet spraying.
   - `spray_oblivious`: deterministic per-flow RNG chooses a path independently for each data packet.
@@ -48,6 +53,7 @@
   - `spray_reps` / `reps`: source-side REPS-inspired strategy that explores paths in the first window, then recycles a bounded FIFO of paths that recently received good ACK/RTT feedback; falls back to random path selection when no good path is cached.
 - htsim native `datacenter/htsim_roce` now accepts multi-path strategies such as `-strat perm` for RoCE instead of aborting.
 - ACK/NACK packets still use the stable reverse route configured on the sink.
+- `ns3_ecmp` also enables htsim RoCE tail RTO recovery by default. This compensates for htsim RoCE's lack of a real timeout path when a final/tail packet is dropped and no later packet exists to trigger a sink NACK. This is deliberately scoped to `ns3_ecmp` unless overridden by `HTSIM_ROCE_TAIL_RTO`.
 - These PLB/REPS strategies borrow the entropy/path-selection shape from the REPS EuroSys artifact but are implemented on the existing htsim RoCE source-route model. They are source-side approximations, not Tomahawk5 switch-port DLB.
 
 ## Inputs
@@ -62,6 +68,7 @@
 - `EndToEnd.csv` from ASTRA `Workload::report()`
 - `fct.txt` from the htsim frontend, with columns:
   - `src dst tag flow_id size_bytes start_ns end_ns fct_ns route_strategy`
+- Set `HTSIM_DISABLE_FCT_OUTPUT=1` to skip creating/writing `fct.txt`; this leaves htsim flow-completion callbacks and ASTRA `EndToEnd.csv` reporting active.
 - htsim native logs when running `extern/network_backend/htsim/sim/datacenter/htsim_roce`
 - `bin/SimAI_htsim` symlink after `./scripts/build.sh -c htsim`
 
@@ -124,6 +131,28 @@
   - all 7 strategies exited 0, logged `packet_level=1`, printed `SimAI-htsim finished`, and wrote 105-line `EndToEnd.csv` files.
   - finish times: `single=622924125`, `ecmp=625586320`, `spray_rr=624261144`, `spray_incremental=624261144`, `spray_plb=622924125`, `spray_reps=625216793`, `spray_oblivious=626701375`.
   - interpretation: `single` and `spray_plb` tied fastest in this 100-layer smoke; `spray_rr`/`spray_incremental` matched exactly as intended; pure random `spray_oblivious` was slowest.
+- Short cross-simulator Dense256 Meta sanity comparison on 2026-06-26:
+  - runner: `experiments/cross_backend_dense256_meta_20260624_114003/run_short_cross_sim_compare.sh 20260626_short10_1mib_r2`
+  - workload: `/tmp/htsim_dense256_short10_1mib.txt`; topology/config: `Meta_Topo_256g_8gps_400Gbps_A100`, `myconfig/Meta256MoE.conf`
+  - output: `experiments/cross_backend_dense256_meta_20260624_114003/short_cross_sim_20260626_short10_1mib_r2/summary.md`
+  - htsim ECMP exited 0, logged `packet_level=1`, wrote 15-line `EndToEnd.csv`, finished at `65367340`, exposed comm `279`, and wrote 144813 FCT rows.
+  - htsim `spray_rr` exited 0, logged `packet_level=1`, wrote 15-line `EndToEnd.csv`, finished at `65258013`, exposed comm `170`, and wrote 144865 FCT rows.
+  - This is a sanity/trend matrix only; full route isolation still depends on the long htsim ECMP and htsim `spray_rr` runs under `experiments/cross_backend_dense256_meta_20260624_114003/`.
+- NS-3-style htsim ECMP smoke on 2026-07-02:
+  - `env PATH=/usr/bin:/bin:$PATH ./scripts/build.sh -c htsim` completed.
+  - `timeout 180s bin/SimAI_htsim -w /tmp/htsim_dense256_short10_1mib.txt -n mytopo/Meta_Topo_256g_8gps_400Gbps_A100 -c myconfig/Meta256MoE.conf -o experiments/htsim_results/csv/ns3_ecmp_short10_1mib_20260702_codex -r ns3_ecmp`
+  - result: exit 0, log contains `route_strategy=ns3_ecmp packet_level=1`, `all passes finished at time: 65339241`, and `SimAI-htsim finished`; `EndToEnd.csv` has 15 lines, total time `65339`, exposed comm `251`, and `fct.txt` has 144721 lines.
+- No-FCT htsim output smoke on 2026-07-02:
+  - `env PATH=/usr/bin:/bin:$PATH ./scripts/build.sh -c htsim` completed.
+  - `timeout 180s env HTSIM_DISABLE_FCT_OUTPUT=1 bin/SimAI_htsim -w /tmp/htsim_dense256_short10_1mib.txt -n mytopo/Meta_Topo_256g_8gps_400Gbps_A100 -c myconfig/Meta256MoE.conf -o experiments/htsim_results/csv/ns3_ecmp_short10_1mib_nofct_20260702_codex -r ns3_ecmp`
+  - result: exit 0, log contains `[htsim] fct output disabled by HTSIM_DISABLE_FCT_OUTPUT`, `EndToEnd.csv` has 15 lines, and no `fct.txt` was created.
+- htsim `ns3_ecmp` tail-stall diagnostics on 2026-07-06:
+  - Added diagnostic helpers under `experiments/cross_backend_dense256_meta_20260624_114003/`: `make_htsim_repro_workloads.py` and `run_htsim_ns3_ecmp_diagnostics.sh`.
+  - `dense256_cap256m_core7` is the compact reproducer: old `ecmp` exits 0 with 12 rows and `all passes finished at time: 54483474`; original `ns3_ecmp` times out after 420s with 0 rows.
+  - Reverse-route stabilization alone still timed out, so the final fix adds default-on `ns3_ecmp` tail RTO recovery in htsim RoCE.
+  - Fixed `ns3_ecmp` on `dense256_cap256m_core7`: exit 0, 12 rows, `all passes finished at time: 734051676`, wall `2:20.67`, RSS about 789 MB, output `htsim_ns3_ecmp_diag_20260706_cap256m_core7_tail_rto_100us/`.
+  - Fixed `ns3_ecmp` on `dense256_fullsize_layernorm_only`: exit 0, 6 rows, `all passes finished at time: 230716551`, wall `2:08.07`, output `htsim_ns3_ecmp_diag_20260706_layernorm_only_tail_rto/`.
+  - A fixed 100us tail watchdog variant was tried and stopped because it caused a retransmit storm; keep the conservative adaptive-RTO implementation unless there is a dedicated queue/RTO tuning pass.
 - Final-drain fix check on 2026-06-24:
   - The full dense Meta `spray_plb` rerun under `experiments/cross_backend_dense256_meta_20260624_114003/htsim_spray_plb_rerun_20260624_143409/` exited 0 with 36.0M FCT rows but empty `EndToEnd.csv`; the log showed `pass: 0 finished` followed by rank0 waiting for streams 1257/1259 in `Ready` state.
   - `Sys::drain_finished_streams()` was updated to drain exhausted `Ready`, `Executing`, and `Zombie` streams, matching the external FlowSim final-drain behavior.

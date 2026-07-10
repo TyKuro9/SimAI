@@ -3,15 +3,15 @@ index 17ccd02..f068548 100755
 --- a/sim/datacenter/main_roce.cpp
 +++ b/sim/datacenter/main_roce.cpp
 @@ -507,9 +507,7 @@ int main(int argc, char **argv) {
-
+                         
          ((HostQueue*)top->queues_ns_nlp[src][top->HOST_POD_SWITCH(src)][0])->addHostSender(roceSrc);
-
+ 
 -        if (route_strategy!=SINGLE_PATH && route_strategy!=ECMP_FIB){
 -            abort();
 -        } else if (route_strategy==ECMP_FIB) {
 +        if (route_strategy==ECMP_FIB) {
              Route* srctotor = new Route();
-
+             
              srctotor->push_back(top->queues_ns_nlp[src][top->HOST_POD_SWITCH(src)][0]);
 @@ -535,12 +533,13 @@ int main(int argc, char **argv) {
              top->switches_lp[top->HOST_POD_SWITCH(dest)]->addHostPort(dest,roceSrc->flow_id(),roceSnk);
@@ -20,7 +20,7 @@ index 17ccd02..f068548 100755
 -            routeout = new Route(*(net_paths[src][dest]->at(choice)));
 -            routeout->add_endpoints(roceSrc, roceSnk);
 +            routeout = new Route(*(net_paths[src][dest]->at(choice)), *roceSnk);
-
+                                 
 -            routein = new Route(*top->get_bidir_paths(dest,src,false)->at(choice));
 -            routein->add_endpoints(roceSnk, roceSrc);
 +            routein = new Route(*top->get_bidir_paths(dest,src,false)->at(choice), *roceSrc);
@@ -29,16 +29,16 @@ index 17ccd02..f068548 100755
 +                roceSrc->set_paths(net_paths[src][dest]);
 +            }
          }
-
+ 
          path_refcounts[src][dest]--;
 diff --git a/sim/roce.cpp b/sim/roce.cpp
-index ba82072..91bc950 100755
+index ba82072..a7ab40b 100755
 --- a/sim/roce.cpp
 +++ b/sim/roce.cpp
 @@ -9,6 +9,14 @@
  #include "trigger.h"
  using namespace std;
-
+ 
 +static bool roce_verbose_logging() {
 +    static bool enabled = []() {
 +        const char* value = getenv("HTSIM_ROCE_VERBOSE");
@@ -50,8 +50,16 @@ index ba82072..91bc950 100755
  ////////////////////////////////////////////////////////////////
  //  ROCE SOURCE
  ////////////////////////////////////////////////////////////////
-@@ -52,6 +60,16 @@ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventl
-
+@@ -29,6 +37,7 @@ uint32_t RoceSrc::_global_rto_count = 0;
+ 
+ /* _min_rto can be tuned using SetMinRTO. Don't change it here.  */
+ simtime_picosec RoceSrc::_min_rto = timeFromUs((uint32_t)DEFAULT_RTO_MIN);
++bool RoceSrc::_tail_rto_enabled = false;
+ 
+ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventlist, linkspeed_bps rate)
+     : BaseQueue(rate,eventlist,NULL), _flow(pktlogger), _logger(logger)
+@@ -52,6 +61,16 @@ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventl
+ 
      _sink = 0;
      _done = false;
 +    _crt_path = 0;
@@ -64,13 +72,17 @@ index ba82072..91bc950 100755
 +    _plb_delivered = 0;
 +    _plb_congested = 0;
 +    _plb_next_round = 0;
-
+ 
      _rtt = 0;
      _rto = timeFromMs(20);
-@@ -77,6 +95,13 @@ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventl
+@@ -74,9 +93,17 @@ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventl
+ 
+     _state_send = READY;
+     _time_last_sent = 0;
++    _last_progress_time = 0;
      _packet_spacing = (simtime_picosec)((Packet::data_packet_size()+RocePacket::ACKSIZE) * (pow(10.0,12.0) * 8) / _bitrate);
  }
-
+ 
 +RoceSrc::~RoceSrc() {
 +    for (Route* route : _paths) {
 +        delete route;
@@ -81,10 +93,10 @@ index ba82072..91bc950 100755
  /*mem_b RoceSrc::queuesize(){
    return 0;
    }
-@@ -89,6 +114,18 @@ void RoceSrc::set_traffic_logger(TrafficLogger* pktlogger) {
+@@ -89,6 +116,18 @@ void RoceSrc::set_traffic_logger(TrafficLogger* pktlogger) {
      _flow.set_logger(pktlogger);
  }
-
+ 
 +void RoceSrc::set_route_strategy(RouteStrategy strategy) {
 +    _route_strategy = strategy;
 +    _crt_path = 0;
@@ -100,9 +112,9 @@ index ba82072..91bc950 100755
  void RoceSrc::log_me() {
      // avoid looping
      if (_log_me == true)
-@@ -101,7 +138,9 @@ void RoceSrc::log_me() {
+@@ -101,7 +140,9 @@ void RoceSrc::log_me() {
  }
-
+ 
  void RoceSrc::startflow(){
 -    cout << "startflow " << _flow._name << " at " << timeAsUs(eventlist().now()) << endl;
 +    if (roce_verbose_logging()) {
@@ -111,10 +123,18 @@ index ba82072..91bc950 100755
      _flow_started = true;
      _highest_sent = 0;
      _last_acked = 0;
-@@ -133,6 +172,119 @@ void RoceSrc::connect(Route* routeout, Route* routeback, RoceSink& sink, simtime
-     //else cout << "TRIGGER START " << _nodename << endl;
+@@ -109,6 +150,7 @@ void RoceSrc::startflow(){
+     _acked_packets = 0;
+     _packets_sent = 0;
+     _done = false;
++    _last_progress_time = eventlist().now();
+     
+     eventlist().sourceIsPendingRel(*this,0);
  }
-
+@@ -133,6 +175,119 @@ void RoceSrc::connect(Route* routeout, Route* routeback, RoceSink& sink, simtime
+     //else cout << "TRIGGER START " << _nodename << endl; 
+ }
+ 
 +void RoceSrc::set_paths(vector<const Route*>* rt_list) {
 +    assert(_sink);
 +    assert(rt_list);
@@ -231,26 +251,28 @@ index ba82072..91bc950 100755
  /* Process a NACK.  Generally this involves queuing the NACKed packet
     for retransmission, but then waiting for a PULL to actually resend
     it.  However, sometimes the NACK has the PULL bit set, and then we
-@@ -140,6 +292,7 @@ void RoceSrc::connect(Route* routeout, Route* routeback, RoceSink& sink, simtime
+@@ -140,6 +295,8 @@ void RoceSrc::connect(Route* routeout, Route* routeback, RoceSink& sink, simtime
  void RoceSrc::processNack(const RoceNack& nack){
      _last_acked = nack.ackno();
      _rtx_packets_sent += _highest_sent - _last_acked;
++    _last_progress_time = eventlist().now();
 +    record_path_feedback(false);
-
+ 
      if (_log_me)
          cout << "Src " << get_id() << " go back n from " <<  _highest_sent << " to " << _last_acked << " at " << timeAsUs(eventlist().now()) << " us" << endl;
-@@ -164,6 +317,7 @@ void RoceSrc::processAck(const RoceAck& ack) {
-
+@@ -164,6 +321,7 @@ void RoceSrc::processAck(const RoceAck& ack) {
+ 
      // Compute rtt.  This comes originally from TCP, and may not be optimal for ROCE */
      uint64_t m = eventlist().now()-ts;
 +    simtime_picosec previous_base_rtt = _base_rtt;
-
+ 
      if (m!=0){
          if (_rtt>0){
-@@ -194,13 +348,21 @@ void RoceSrc::processAck(const RoceAck& ack) {
+@@ -194,13 +352,22 @@ void RoceSrc::processAck(const RoceAck& ack) {
          // the cumulative ack, but we'll get an ACK or NACK anyway in
          // due course.
          _last_acked = ackno;
++        _last_progress_time = eventlist().now();
 +        bool good_path = true;
 +        if (previous_base_rtt > 0 && previous_base_rtt != timeInf &&
 +            m > previous_base_rtt + previous_base_rtt / 4) {
@@ -259,7 +281,7 @@ index ba82072..91bc950 100755
 +        record_path_feedback(good_path);
      }
      if (_logger) _logger->logRoce(*this, RoceLogger::ROCE_RCV);
-
+ 
      if (_log_me)
          cout << "Src " << get_id() << " ackno " << ackno << endl;
      if (ackno >= _flow_size){
@@ -270,33 +292,71 @@ index ba82072..91bc950 100755
          _done = true;
          if (_end_trigger) {
              _end_trigger->activate();
-@@ -238,8 +400,10 @@ void RoceSrc::receivePacket(Packet& pkt)
+@@ -238,8 +405,10 @@ void RoceSrc::receivePacket(Packet& pkt)
          _stop_time = 0;
      }
-
+ 
 -    if (_done)
 +    if (_done) {
 +        pkt.free();
          return;
 +    }
-
+ 
      switch (pkt.type()) {
      case ETH_PAUSE:
-@@ -283,10 +447,11 @@ void RoceSrc::send_packet() {
+@@ -283,10 +452,11 @@ void RoceSrc::send_packet() {
          }
      }
-
+ 
 -    p = RocePacket::newpkt(_flow, *_route, _highest_sent+1, _mss, false, last_packet,_dstaddr);
 +    const Route* route = choose_route();
 +    p = RocePacket::newpkt(_flow, *route, _highest_sent+1, _mss, false, last_packet,_dstaddr);
-
+     
      assert(p);
 -    p->set_pathid(_pathid);
 +    p->set_pathid(route->path_id() >= 0 ? route->path_id() : _last_path);
-
+ 
      p->flow().logTraffic(*p,*this,TrafficLogger::PKT_CREATESEND);
      p->set_ts(eventlist().now());
-@@ -446,7 +611,3 @@ void RoceSink::send_nack(simtime_picosec ts, RocePacket::seq_t ackno) {
+@@ -309,6 +479,9 @@ void RoceSrc::doNextEvent() {
+       }*/
+ 
+     assert(_flow_started);
++    if (_done) {
++        return;
++    }
+     if (_log_me) 
+         cout << "Src " << get_id() << " do next event\n";
+         
+@@ -319,6 +492,27 @@ void RoceSrc::doNextEvent() {
+         return;
+     }
+ 
++    if (_tail_rto_enabled && _flow_size && _highest_sent >= _flow_size &&
++        _last_acked < _flow_size) {
++        simtime_picosec now = eventlist().now();
++        simtime_picosec rto = _rto < _min_rto ? _min_rto : _rto;
++        simtime_picosec rto_time = _last_progress_time + rto;
++        if (now >= rto_time) {
++            if (roce_verbose_logging()) {
++                cout << "Src " << get_id() << " tail RTO from "
++                     << _highest_sent << " to " << _last_acked << " at "
++                     << timeAsUs(now) << " us" << endl;
++            }
++            _global_rto_count++;
++            _rtx_packets_sent += _highest_sent - _last_acked;
++            _highest_sent = _last_acked;
++            _last_progress_time = now;
++        } else {
++            eventlist().sourceIsPending(*this, rto_time);
++            return;
++        }
++    }
++
+     if (_flow_size && _highest_sent >= _flow_size) { 
+         if (_log_me) 
+             cout << "Src " << get_id()  << " stopping send coz highest_sent is " << _highest_sent << endl;
+@@ -446,7 +640,3 @@ void RoceSink::send_nack(simtime_picosec ts, RocePacket::seq_t ackno) {
      nack->set_ts(ts);
      nack->sendOn();
  }
@@ -305,11 +365,11 @@ index ba82072..91bc950 100755
 -
 -
 diff --git a/sim/roce.h b/sim/roce.h
-index 4796dda..154218e 100755
+index 4796dda..a4c57b2 100755
 --- a/sim/roce.h
 +++ b/sim/roce.h
 @@ -10,6 +10,8 @@
-
+ 
  #include <list>
  #include <map>
 +#include <deque>
@@ -322,12 +382,20 @@ index 4796dda..154218e 100755
  public:
      RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventlist, linkspeed_bps rate);
 +    ~RoceSrc();
-
+ 
      virtual void connect(Route* routeout, Route* routeback, RoceSink& sink, simtime_picosec startTime);
      void set_dst(uint32_t dst) {_dstaddr = dst;}
-@@ -67,6 +70,15 @@ public:
+@@ -45,6 +48,7 @@ public:
+ 
+ 
+     static void setMinRTO(uint32_t min_rto_in_us) {_min_rto = timeFromUs((uint32_t)min_rto_in_us);}
++    static void setTailRTO(bool enabled) {_tail_rto_enabled = enabled;}
+ 
+     void set_flowsize(uint64_t flow_size_in_bytes) {
+         _flow_size = flow_size_in_bytes;
+@@ -67,6 +71,15 @@ public:
      virtual void receivePacket(Packet& pkt);
-
+ 
      virtual void setPath(uint32_t p) {_pathid = p;}
 +    enum RouteStrategy {
 +        ROCE_ROUTE_INCREMENTAL,
@@ -338,12 +406,12 @@ index 4796dda..154218e 100755
 +    void set_route_strategy(RouteStrategy strategy);
 +    void set_paths(vector<const Route*>* rt_list);
 +    const Route* choose_route();
-
+ 
      virtual void processPause(const EthPausePacket& pkt);
      virtual void processAck(const RoceAck& ack);
-@@ -102,10 +114,24 @@ public:
+@@ -102,10 +115,24 @@ public:
      RoceSink* _sink;
-
+  
      const Route* _route;
 +    vector<Route*> _paths;
 +    uint32_t _crt_path;
@@ -358,16 +426,32 @@ index 4796dda..154218e 100755
 +    deque<uint32_t> _reps_good_paths;
      bool _flow_started;
      uint16_t _state_send;
-
+ 
      void send_packet();
 +    uint32_t random_path_index();
 +    void record_path_feedback(bool good);
 +    void add_reps_good_path(uint32_t path_id);
-
+ 
      virtual const string& nodename() { return _nodename; }
      inline uint32_t flow_id() const { return _flow.flow_id();}
-@@ -192,4 +218,3 @@ private:
-
-
+@@ -117,6 +144,7 @@ public:
+     static uint32_t _global_node_count; 
+     static uint32_t _global_rto_count;  // keep track of the total number of timeouts across all srcs
+     static simtime_picosec _min_rto;
++    static bool _tail_rto_enabled;
+ 
+     PacketFlow _flow;
+ 
+@@ -138,6 +166,7 @@ private:
+     simtime_picosec _stop_time;
+     simtime_picosec _packet_spacing;
+     simtime_picosec _time_last_sent;
++    simtime_picosec _last_progress_time;
+     bool _done;
+ };
+ 
+@@ -192,4 +221,3 @@ private:
+ 
+ 
  #endif
 -

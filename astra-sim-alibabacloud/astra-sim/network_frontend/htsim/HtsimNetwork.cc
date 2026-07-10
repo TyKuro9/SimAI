@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <deque>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -160,6 +161,11 @@ struct HtsimFlowOwner {
   unique_ptr<Route> route_out;
   unique_ptr<Route> route_in;
   unique_ptr<FlowDoneTrigger> trigger;
+  int src_node = -1;
+  int dst_node = -1;
+  uint64_t bytes = 0;
+  simtime_picosec start_time = 0;
+  AstraSim::ncclFlowTag flowTag;
   bool done = false;
   uint64_t completion_sequence = 0;
 };
@@ -196,6 +202,7 @@ class SimaiPacketTopology {
     }
 
     adjacency.assign(node_num, {});
+    reverse_adjacency.assign(node_num, {});
     uint32_t parsed_links = 0;
     int src = 0;
     int dst = 0;
@@ -278,6 +285,47 @@ class SimaiPacketTopology {
     return speedFromGbps(static_cast<double>(default_bandwidth_gbps));
   }
 
+  unique_ptr<Route> build_ns3_ecmp_route(
+      int src,
+      int dst,
+      const AstraSim::ncclFlowTag& flowTag,
+      PacketSink& endpoint) {
+    vector<int>& dist = distances_to_dst(dst);
+    if (src < 0 || dst < 0 || src >= static_cast<int>(dist.size()) ||
+        dst >= static_cast<int>(dist.size()) ||
+        dist[src] == numeric_limits<int>::max()) {
+      throw runtime_error(
+          "htsim topology has no ns3_ecmp path from " + to_string(src) +
+          " to " + to_string(dst));
+    }
+
+    unique_ptr<Route> route(new Route());
+    int current = src;
+    while (current != dst) {
+      vector<int> next_hops;
+      for (int next : adjacency[current]) {
+        if (next >= 0 && next < static_cast<int>(dist.size()) &&
+            dist[next] == dist[current] - 1) {
+          next_hops.push_back(next);
+        }
+      }
+      if (next_hops.empty()) {
+        throw runtime_error(
+            "htsim ns3_ecmp could not choose next hop from " +
+            to_string(current) + " to " + to_string(dst));
+      }
+      sort(next_hops.begin(), next_hops.end());
+      size_t choice = ns3_ecmp_next_hop_choice(
+          src, dst, current, flowTag, next_hops.size());
+      int next = next_hops[choice];
+      append_link_to_route(current, next, route.get());
+      current = next;
+    }
+    route->push_back(&endpoint);
+    route->set_path_id(0, 1);
+    return route;
+  }
+
  private:
   void add_directed_link(const SimaiLink& link) {
     EdgeKey edge{link.src, link.dst};
@@ -286,6 +334,7 @@ class SimaiPacketTopology {
     }
     links[edge] = link;
     adjacency[link.src].push_back(link.dst);
+    reverse_adjacency[link.dst].push_back(link.src);
 
     linkspeed_bps speed = speedFromGbps(static_cast<double>(link.bandwidth_gbps));
     unique_ptr<Queue> queue(
@@ -297,6 +346,17 @@ class SimaiPacketTopology {
         "p_" + to_string(link.src) + "_" + to_string(link.dst));
     queues[edge] = std::move(queue);
     pipes[edge] = std::move(pipe);
+  }
+
+  void append_link_to_route(int src, int dst, Route* route) {
+    EdgeKey edge{src, dst};
+    auto q = queues.find(edge);
+    auto p = pipes.find(edge);
+    if (q == queues.end() || p == pipes.end()) {
+      throw runtime_error("missing htsim directed edge while building route");
+    }
+    route->push_back(q->second.get());
+    route->push_back(p->second.get());
   }
 
   vector<vector<int>> find_shortest_paths(int src, int dst) const {
@@ -346,6 +406,51 @@ class SimaiPacketTopology {
     return results;
   }
 
+  vector<int>& distances_to_dst(int dst) {
+    auto cached = distance_cache.find(dst);
+    if (cached != distance_cache.end()) {
+      return cached->second;
+    }
+
+    vector<int> dist(adjacency.size(), numeric_limits<int>::max());
+    deque<int> todo;
+    dist[dst] = 0;
+    todo.push_back(dst);
+    while (!todo.empty()) {
+      int u = todo.front();
+      todo.pop_front();
+      for (int prev : reverse_adjacency[u]) {
+        if (dist[prev] == numeric_limits<int>::max()) {
+          dist[prev] = dist[u] + 1;
+          todo.push_back(prev);
+        }
+      }
+    }
+    auto inserted = distance_cache.emplace(dst, std::move(dist));
+    return inserted.first->second;
+  }
+
+  size_t ns3_ecmp_next_hop_choice(
+      int src,
+      int dst,
+      int current,
+      const AstraSim::ncclFlowTag& flowTag,
+      size_t next_hop_count) const {
+    uint64_t hash = 1469598103934665603ULL;
+    auto mix = [&hash](uint64_t value) {
+      hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+    };
+    mix(static_cast<uint64_t>(src));
+    mix(static_cast<uint64_t>(dst));
+    mix(static_cast<uint64_t>(current));
+    mix(static_cast<uint64_t>(flowTag.tag_id));
+    mix(static_cast<uint64_t>(flowTag.channel_id));
+    mix(static_cast<uint64_t>(flowTag.chunk_id));
+    mix(static_cast<uint64_t>(flowTag.current_flow_id));
+    mix(static_cast<uint64_t>(flowTag.child_flow_id));
+    return static_cast<size_t>(hash % next_hop_count);
+  }
+
   void collect_paths(
       int src,
       int current,
@@ -382,11 +487,13 @@ class SimaiPacketTopology {
   }
 
   vector<vector<int>> adjacency;
+  vector<vector<int>> reverse_adjacency;
   map<EdgeKey, SimaiLink> links;
   map<EdgeKey, unique_ptr<Queue>> queues;
   map<EdgeKey, unique_ptr<Pipe>> pipes;
   vector<unique_ptr<Route>> owned_routes;
   map<pair<int, int>, vector<const Route*>> path_cache;
+  map<int, vector<int>> distance_cache;
 };
 
 unique_ptr<SimaiPacketTopology> packet_topology;
@@ -525,6 +632,195 @@ simtime_picosec flow_delay_ps(uint64_t bytes) {
   return max<simtime_picosec>(1, delay);
 }
 
+bool fallback_task_accepts_flow_tag(
+    const htsim_task& task,
+    const AstraSim::ncclFlowTag& flowTag) {
+  auto* ehd =
+      static_cast<AstraSim::RecvPacketEventHadndlerData*>(task.fun_arg);
+  if (ehd == nullptr) {
+    return true;
+  }
+  const AstraSim::ncclFlowTag& expected = ehd->flowTag;
+  if (expected.receiver_node >= 0 &&
+      flowTag.receiver_node != expected.receiver_node) {
+    return false;
+  }
+  if (expected.channel_id >= 0 && flowTag.channel_id != expected.channel_id) {
+    return false;
+  }
+  if (expected.tree_flow_list.empty() || flowTag.tree_flow_list.empty()) {
+    return true;
+  }
+  for (int next_flow_id : flowTag.tree_flow_list) {
+    if (next_flow_id == -1) {
+      continue;
+    }
+    bool found = false;
+    for (int expected_flow_id : expected.tree_flow_list) {
+      if (expected_flow_id == next_flow_id) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool flow_tag_has_specific_successor(const AstraSim::ncclFlowTag& flowTag) {
+  for (int next_flow_id : flowTag.tree_flow_list) {
+    if (next_flow_id != -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool find_unique_expected_recv_by_route(
+    int src,
+    int dst,
+    uint64_t count,
+    int reference_tag,
+    const AstraSim::ncclFlowTag& flowTag,
+    pair<int, pair<int, int>>& found_key,
+    htsim_task& found_task) {
+  bool found = false;
+  long long best_diff = 0;
+  for (const auto& item : expeRecvHash) {
+    if (item.first.second.first != src || item.first.second.second != dst ||
+        item.second.count != count) {
+      continue;
+    }
+    if (!fallback_task_accepts_flow_tag(item.second, flowTag)) {
+      continue;
+    }
+    long long diff = item.first.first > reference_tag
+        ? static_cast<long long>(item.first.first) - reference_tag
+        : static_cast<long long>(reference_tag) - item.first.first;
+    if (found && diff == best_diff) {
+      return false;
+    }
+    if (found && diff > best_diff) {
+      continue;
+    }
+    found = true;
+    best_diff = diff;
+    found_key = item.first;
+    found_task = item.second;
+  }
+  return found;
+}
+
+bool find_unique_expected_recv_by_flow_tag(
+    int dst,
+    uint64_t count,
+    int reference_tag,
+    const AstraSim::ncclFlowTag& flowTag,
+    pair<int, pair<int, int>>& found_key,
+    htsim_task& found_task) {
+  if (!flow_tag_has_specific_successor(flowTag)) {
+    return false;
+  }
+  bool found = false;
+  long long best_diff = 0;
+  for (const auto& item : expeRecvHash) {
+    if (item.first.second.second != dst || item.second.count != count) {
+      continue;
+    }
+    if (!fallback_task_accepts_flow_tag(item.second, flowTag)) {
+      continue;
+    }
+    long long diff = item.first.first > reference_tag
+        ? static_cast<long long>(item.first.first) - reference_tag
+        : static_cast<long long>(reference_tag) - item.first.first;
+    if (found && diff == best_diff) {
+      return false;
+    }
+    if (found && diff > best_diff) {
+      continue;
+    }
+    found = true;
+    best_diff = diff;
+    found_key = item.first;
+    found_task = item.second;
+  }
+  return found;
+}
+
+bool find_unique_arrived_recv_by_route(
+    int src,
+    int dst,
+    uint64_t count,
+    int reference_tag,
+    const htsim_task& expected_task,
+    pair<int, pair<int, int>>& found_key) {
+  bool found = false;
+  long long best_diff = 0;
+  for (const auto& item : recvHash) {
+    if (item.first.second.first != src || item.first.second.second != dst ||
+        item.second != count) {
+      continue;
+    }
+    auto pending_it = receiver_pending_queue.find(
+        make_pair(make_pair(dst, src), item.first.first));
+    if (pending_it == receiver_pending_queue.end() ||
+        !fallback_task_accepts_flow_tag(expected_task, pending_it->second)) {
+      continue;
+    }
+    long long diff = item.first.first > reference_tag
+        ? static_cast<long long>(item.first.first) - reference_tag
+        : static_cast<long long>(reference_tag) - item.first.first;
+    if (found && diff == best_diff) {
+      return false;
+    }
+    if (found && diff > best_diff) {
+      continue;
+    }
+    found = true;
+    best_diff = diff;
+    found_key = item.first;
+  }
+  return found;
+}
+
+bool find_unique_arrived_recv_by_flow_tag(
+    int reference_tag,
+    const htsim_task& expected_task,
+    pair<int, pair<int, int>>& found_key) {
+  bool found = false;
+  long long best_diff = 0;
+  for (const auto& item : recvHash) {
+    if (item.first.second.second != expected_task.dest ||
+        item.second != expected_task.count) {
+      continue;
+    }
+    auto pending_it = receiver_pending_queue.find(
+        make_pair(
+            make_pair(item.first.second.second, item.first.second.first),
+            item.first.first));
+    if (pending_it == receiver_pending_queue.end() ||
+        !flow_tag_has_specific_successor(pending_it->second) ||
+        !fallback_task_accepts_flow_tag(expected_task, pending_it->second)) {
+      continue;
+    }
+    long long diff = item.first.first > reference_tag
+        ? static_cast<long long>(item.first.first) - reference_tag
+        : static_cast<long long>(reference_tag) - item.first.first;
+    if (found && diff == best_diff) {
+      return false;
+    }
+    if (found && diff > best_diff) {
+      continue;
+    }
+    found = true;
+    best_diff = diff;
+    found_key = item.first;
+  }
+  return found;
+}
+
 void notify_receiver_receive_data(
     int sender_node,
     int receiver_node,
@@ -560,6 +856,57 @@ void notify_receiver_receive_data(
       expeRecvHash[key] = task;
     }
   } else {
+    pair<int, pair<int, int>> fallback_key = key;
+    htsim_task fallback_task;
+    if (find_unique_expected_recv_by_route(
+            sender_node,
+            receiver_node,
+            message_size,
+            tag,
+            flowTag,
+            fallback_key,
+            fallback_task)) {
+      auto* ehd =
+          static_cast<AstraSim::RecvPacketEventHadndlerData*>(
+              fallback_task.fun_arg);
+      expeRecvHash.erase(fallback_key);
+      if (ehd->flowTag.current_flow_id == -1 &&
+          ehd->flowTag.child_flow_id == -1) {
+        ehd->flowTag = flowTag;
+      }
+      if (fallback_task.msg_handler != nullptr && ehd->node != nullptr &&
+          ehd->owner != nullptr) {
+        fallback_task.msg_handler(fallback_task.fun_arg);
+      } else {
+        delete ehd;
+      }
+      nodeHash[make_pair(receiver_node, 1)] += message_size;
+      return;
+    }
+    if (find_unique_expected_recv_by_flow_tag(
+            receiver_node,
+            message_size,
+            tag,
+            flowTag,
+            fallback_key,
+            fallback_task)) {
+      auto* ehd =
+          static_cast<AstraSim::RecvPacketEventHadndlerData*>(
+              fallback_task.fun_arg);
+      expeRecvHash.erase(fallback_key);
+      if (ehd->flowTag.current_flow_id == -1 &&
+          ehd->flowTag.child_flow_id == -1) {
+        ehd->flowTag = flowTag;
+      }
+      if (fallback_task.msg_handler != nullptr && ehd->node != nullptr &&
+          ehd->owner != nullptr) {
+        fallback_task.msg_handler(fallback_task.fun_arg);
+      } else {
+        delete ehd;
+      }
+      nodeHash[make_pair(receiver_node, 1)] += message_size;
+      return;
+    }
     receiver_pending_queue[pending_key] = flowTag;
     recvHash[key] += message_size;
   }
@@ -641,6 +988,115 @@ bool flow_level_forced() {
   return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+bool fct_output_disabled() {
+  const char* value = getenv("HTSIM_DISABLE_FCT_OUTPUT");
+  if (value == nullptr || value[0] == '\0' || value[0] == '0') {
+    return false;
+  }
+  string token(value);
+  transform(token.begin(), token.end(), token.begin(), ::tolower);
+  return token != "false" && token != "no" && token != "off";
+}
+
+bool tail_rto_enabled_for_strategy(const string& strategy) {
+  const char* value = getenv("HTSIM_ROCE_TAIL_RTO");
+  if (value != nullptr && value[0] != '\0') {
+    string token(value);
+    transform(token.begin(), token.end(), token.begin(), ::tolower);
+    return token != "0" && token != "false" && token != "no" &&
+        token != "off";
+  }
+  return strategy == "ns3_ecmp";
+}
+
+uint32_t roce_min_rto_us_for_strategy(const string& strategy) {
+  const char* value = getenv("HTSIM_ROCE_MIN_RTO_US");
+  if (value != nullptr && value[0] != '\0') {
+    return max<uint32_t>(1, strtoul(value, nullptr, 10));
+  }
+  return strategy == "ns3_ecmp" ? 100U : static_cast<uint32_t>(DEFAULT_RTO_MIN);
+}
+
+uint64_t htsim_watchdog_event_interval() {
+  static const uint64_t value = []() {
+    const char* interval = getenv("HTSIM_WATCHDOG_EVENTS");
+    if (interval == nullptr || interval[0] == '\0') {
+      return 0ULL;
+    }
+    return strtoull(interval, nullptr, 10);
+  }();
+  return value;
+}
+
+size_t htsim_watchdog_sample_limit() {
+  static const size_t value = []() {
+    const char* limit = getenv("HTSIM_WATCHDOG_SAMPLE_FLOWS");
+    if (limit == nullptr || limit[0] == '\0') {
+      return static_cast<size_t>(8);
+    }
+    return max<size_t>(1, strtoull(limit, nullptr, 10));
+  }();
+  return value;
+}
+
+void dump_htsim_watchdog_state(uint64_t event_count) {
+  size_t active_flows = 0;
+  size_t started_flows = 0;
+  size_t printed = 0;
+  for (const auto& flow : owned_flows) {
+    if (flow == nullptr || flow->done) {
+      continue;
+    }
+    active_flows++;
+    if (flow->src != nullptr && flow->src->_flow_started) {
+      started_flows++;
+    }
+  }
+
+  cout << "[htsim watchdog] events=" << event_count
+       << " now_ps=" << EventList::now()
+       << " completed_flows=" << completed_flow_sequence
+       << " owned_flows=" << owned_flows.size()
+       << " active_flows=" << active_flows
+       << " started_flows=" << started_flows
+       << " sentHash=" << sentHash.size()
+       << " recvHash=" << recvHash.size()
+       << " expeRecvHash=" << expeRecvHash.size()
+       << " receiver_pending=" << receiver_pending_queue.size()
+       << " owned_events=" << owned_events.size()
+       << " strategy=" << route_strategy_value << endl;
+
+  const size_t sample_limit = htsim_watchdog_sample_limit();
+  for (const auto& flow : owned_flows) {
+    if (flow == nullptr || flow->done || flow->src == nullptr) {
+      continue;
+    }
+    cout << "[htsim watchdog]   flow src=" << flow->src_node
+         << " dst=" << flow->dst_node
+         << " tag=" << flow->flowTag.tag_id
+         << " channel=" << flow->flowTag.channel_id
+         << " current_flow=" << flow->flowTag.current_flow_id
+         << " bytes=" << flow->bytes
+         << " age_ps=" << (EventList::now() - flow->start_time)
+         << " flow_id=" << flow->src->flow_id()
+         << " started=" << flow->src->_flow_started
+         << " src_last_acked=" << flow->src->_last_acked
+         << " src_highest_sent=" << flow->src->_highest_sent
+         << " packets_sent=" << flow->src->_packets_sent
+         << " acks=" << flow->src->_acks_received
+         << " nacks=" << flow->src->_nacks_received
+         << " rtx=" << flow->src->_rtx_packets_sent;
+    if (flow->sink != nullptr) {
+      cout << " sink_cum_ack=" << flow->sink->cumulative_ack();
+    }
+    cout << endl;
+    printed++;
+    if (printed >= sample_limit) {
+      break;
+    }
+  }
+}
+
 size_t stable_path_choice(int src, int dst, int tag, size_t path_count) {
   if (path_count == 0) {
     return 0;
@@ -683,6 +1139,10 @@ bool schedule_roce_packet_flow(
   size_t reverse_choice = min(choice, paths_in->size() - 1);
 
   unique_ptr<HtsimFlowOwner> flow(new HtsimFlowOwner());
+  flow->src_node = src;
+  flow->dst_node = dst;
+  flow->bytes = count;
+  flow->flowTag = flowTag;
   linkspeed_bps rate = packet_topology->sender_rate(src, dst);
   flow->src.reset(new RoceSrc(nullptr, nullptr, htsim_eventlist, rate));
   flow->sink.reset(new RoceSink());
@@ -705,6 +1165,7 @@ bool schedule_roce_packet_flow(
   flow->sink->setName("Roce_sink_" + to_string(src) + "_" + to_string(dst));
 
   simtime_picosec start_time = EventList::now();
+  flow->start_time = start_time;
   FlowCompletion* completion =
       new FlowCompletion{src, dst, count, start_time, start_time, flowTag, flow.get()};
   flow->trigger.reset(new FlowDoneTrigger(
@@ -713,14 +1174,22 @@ bool schedule_roce_packet_flow(
       completion));
   flow->src->set_end_trigger(*flow->trigger);
 
-  flow->route_out.reset(new Route(*(paths_out->at(choice)), *flow->sink));
-  flow->route_in.reset(new Route(*(paths_in->at(reverse_choice)), *flow->src));
+  if (route_strategy_value == "ns3_ecmp") {
+    flow->route_out = packet_topology->build_ns3_ecmp_route(
+        src, dst, flowTag, *flow->sink);
+    reverse_choice = stable_path_choice(dst, src, tag, paths_in->size());
+    flow->route_in.reset(new Route(*(paths_in->at(reverse_choice)), *flow->src));
+  } else {
+    flow->route_out.reset(new Route(*(paths_out->at(choice)), *flow->sink));
+    flow->route_in.reset(new Route(*(paths_in->at(reverse_choice)), *flow->src));
+  }
   flow->src->connect(
       flow->route_out.get(),
       flow->route_in.get(),
       *flow->sink,
       EventList::now());
   if (route_strategy_value != "single" && route_strategy_value != "ecmp" &&
+      route_strategy_value != "ns3_ecmp" &&
       paths_out->size() > 1) {
     flow->src->set_paths(paths_out);
   }
@@ -730,6 +1199,140 @@ bool schedule_roce_packet_flow(
 }
 
 }  // namespace
+
+void htsim_dump_pending_state(size_t limit) {
+  cerr << "[htsim debug] pending maps sentHash=" << sentHash.size()
+       << " recvHash=" << recvHash.size()
+       << " expeRecvHash=" << expeRecvHash.size()
+       << " receiver_pending=" << receiver_pending_queue.size()
+       << " nodeHash=" << nodeHash.size() << endl;
+
+  map<tuple<int, int, uint64_t>, size_t> recv_routes;
+  map<tuple<int, int, uint64_t>, size_t> expected_routes;
+  for (const auto& item : recvHash) {
+    recv_routes[make_tuple(
+        item.first.second.first, item.first.second.second, item.second)]++;
+  }
+  for (const auto& item : expeRecvHash) {
+    expected_routes[make_tuple(
+        item.first.second.first, item.first.second.second, item.second.count)]++;
+  }
+
+  size_t recv_exact_route_hits = 0;
+  size_t recv_reverse_route_hits = 0;
+  for (const auto& item : recvHash) {
+    auto exact_key = make_tuple(
+        item.first.second.first, item.first.second.second, item.second);
+    auto reverse_key = make_tuple(
+        item.first.second.second, item.first.second.first, item.second);
+    if (expected_routes.count(exact_key) != 0) {
+      recv_exact_route_hits++;
+    }
+    if (expected_routes.count(reverse_key) != 0) {
+      recv_reverse_route_hits++;
+    }
+  }
+
+  size_t expected_exact_route_hits = 0;
+  for (const auto& item : expeRecvHash) {
+    auto exact_key = make_tuple(
+        item.first.second.first, item.first.second.second, item.second.count);
+    if (recv_routes.count(exact_key) != 0) {
+      expected_exact_route_hits++;
+    }
+  }
+  cerr << "[htsim debug] route overlap recv_exact="
+       << recv_exact_route_hits
+       << " expected_exact=" << expected_exact_route_hits
+       << " recv_reverse=" << recv_reverse_route_hits
+       << " recv_unique_routes=" << recv_routes.size()
+       << " expected_unique_routes=" << expected_routes.size() << endl;
+
+  auto print_flow_tag = [](const AstraSim::ncclFlowTag& flowTag) {
+    cerr << " flowTag(tag=" << flowTag.tag_id
+         << " ch=" << flowTag.channel_id
+         << " chunk=" << flowTag.chunk_id
+         << " current=" << flowTag.current_flow_id
+         << " child=" << flowTag.child_flow_id
+         << " sender=" << flowTag.sender_node
+         << " receiver=" << flowTag.receiver_node
+         << " size=" << flowTag.flow_size
+         << " tree=[";
+    size_t printed = 0;
+    for (int flow_id : flowTag.tree_flow_list) {
+      if (printed > 0) {
+        cerr << ",";
+      }
+      cerr << flow_id;
+      printed++;
+      if (printed >= 8) {
+        if (flowTag.tree_flow_list.size() > printed) {
+          cerr << ",...";
+        }
+        break;
+      }
+    }
+    cerr << "])";
+  };
+
+  size_t printed = 0;
+  for (const auto& item : sentHash) {
+    if (printed >= limit) {
+      break;
+    }
+    cerr << "[htsim debug] sentHash tag=" << item.first.first
+         << " src=" << item.first.second.first
+         << " dst=" << item.first.second.second
+         << " count=" << item.second.count
+         << " type=" << item.second.type << endl;
+    printed++;
+  }
+
+  printed = 0;
+  for (const auto& item : recvHash) {
+    if (printed >= limit) {
+      break;
+    }
+    cerr << "[htsim debug] recvHash tag=" << item.first.first
+         << " src=" << item.first.second.first
+         << " dst=" << item.first.second.second
+         << " bytes=" << item.second << endl;
+    printed++;
+  }
+
+  printed = 0;
+  for (const auto& item : expeRecvHash) {
+    if (printed >= limit) {
+      break;
+    }
+    cerr << "[htsim debug] expeRecvHash tag=" << item.first.first
+         << " src=" << item.first.second.first
+         << " dst=" << item.first.second.second
+         << " count=" << item.second.count
+         << " type=" << item.second.type;
+    auto* ehd =
+        static_cast<AstraSim::RecvPacketEventHadndlerData*>(item.second.fun_arg);
+    if (ehd != nullptr) {
+      print_flow_tag(ehd->flowTag);
+    }
+    cerr << endl;
+    printed++;
+  }
+
+  printed = 0;
+  for (const auto& item : receiver_pending_queue) {
+    if (printed >= limit) {
+      break;
+    }
+    cerr << "[htsim debug] receiver_pending receiver="
+         << item.first.first.first
+         << " sender=" << item.first.first.second
+         << " tag=" << item.first.second;
+    print_flow_tag(item.second);
+    cerr << endl;
+    printed++;
+  }
+}
 
 bool htsim_load_topology_summary(const string& topology_file) {
   if (!flow_level_forced()) {
@@ -798,6 +1401,10 @@ void htsim_set_result_dir(const string& result_dir) {
   if (fct_file.is_open()) {
     fct_file.close();
   }
+  if (fct_output_disabled()) {
+    cout << "[htsim] fct output disabled by HTSIM_DISABLE_FCT_OUTPUT" << endl;
+    return;
+  }
   fct_file.open((result_dir_value + "fct.txt").c_str(), ios::out | ios::trunc);
   if (!fct_file.is_open()) {
     throw runtime_error("unable to open htsim fct output: " + result_dir_value + "fct.txt");
@@ -807,11 +1414,17 @@ void htsim_set_result_dir(const string& result_dir) {
 
 void htsim_set_route_strategy(const string& strategy) {
   if (strategy == "single" || strategy == "ecmp" ||
+      strategy == "ns3_ecmp" ||
       strategy == "spray_rr" || strategy == "spray_incremental" ||
       strategy == "spray_oblivious" || strategy == "spray_plb" ||
       strategy == "plb" || strategy == "spray_reps" ||
       strategy == "reps") {
     route_strategy_value = strategy;
+    bool tail_rto_enabled = tail_rto_enabled_for_strategy(strategy);
+    RoceSrc::setTailRTO(tail_rto_enabled);
+    if (tail_rto_enabled) {
+      RoceSrc::setMinRTO(roce_min_rto_us_for_strategy(strategy));
+    }
     return;
   }
   throw invalid_argument("unsupported htsim route_strategy: " + strategy);
@@ -838,7 +1451,9 @@ void htsim_schedule_flow_completion(
   schedule_callback(delay, flow_completion_callback, completion);
 }
 
-void htsim_run() {
+void htsim_run(const function<void()>& watchdog_callback) {
+  const uint64_t watchdog_interval = htsim_watchdog_event_interval();
+  uint64_t next_watchdog_event = watchdog_interval;
   while (!htsim_stopped && EventList::doNextEvent()) {
     htsim_events_processed++;
     if (completed_flow_sequence >= flow_reclaim_batch_size() &&
@@ -847,6 +1462,14 @@ void htsim_run() {
     }
     if (htsim_events_processed % kPeriodicEventReclaimInterval == 0) {
       reclaim_completed_events();
+    }
+    if (watchdog_interval > 0 &&
+        htsim_events_processed >= next_watchdog_event) {
+      dump_htsim_watchdog_state(htsim_events_processed);
+      if (watchdog_callback != nullptr) {
+        watchdog_callback();
+      }
+      next_watchdog_event += watchdog_interval;
     }
   }
   htsim_events_processed = 0;
@@ -1010,6 +1633,44 @@ int HtsimNetwork::sim_recv(
       expeRecvHash[key] = task;
     }
   } else {
+    pair<int, pair<int, int>> fallback_key = key;
+    if (find_unique_arrived_recv_by_route(
+            task.src, task.dest, task.count, tag, task, fallback_key)) {
+      uint64_t fallback_count = recvHash[fallback_key];
+      recvHash.erase(fallback_key);
+      auto pending_key = make_pair(make_pair(rank, src), fallback_key.first);
+      auto pending = receiver_pending_queue.find(pending_key);
+      if (pending != receiver_pending_queue.end() &&
+          ehd->flowTag.current_flow_id == -1 &&
+          ehd->flowTag.child_flow_id == -1) {
+        ehd->flowTag = pending->second;
+        receiver_pending_queue.erase(pending);
+      }
+      if (fallback_count > task.count) {
+        recvHash[fallback_key] = fallback_count - task.count;
+      }
+      task.msg_handler(task.fun_arg);
+      return 0;
+    }
+    if (find_unique_arrived_recv_by_flow_tag(tag, task, fallback_key)) {
+      uint64_t fallback_count = recvHash[fallback_key];
+      recvHash.erase(fallback_key);
+      auto pending_key = make_pair(
+          make_pair(fallback_key.second.second, fallback_key.second.first),
+          fallback_key.first);
+      auto pending = receiver_pending_queue.find(pending_key);
+      if (pending != receiver_pending_queue.end() &&
+          ehd->flowTag.current_flow_id == -1 &&
+          ehd->flowTag.child_flow_id == -1) {
+        ehd->flowTag = pending->second;
+        receiver_pending_queue.erase(pending);
+      }
+      if (fallback_count > task.count) {
+        recvHash[fallback_key] = fallback_count - task.count;
+      }
+      task.msg_handler(task.fun_arg);
+      return 0;
+    }
     expeRecvHash[key] = task;
   }
   return 0;

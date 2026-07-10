@@ -189,6 +189,7 @@ class Sys : public Callable {
   void register_for_finished_stream(Callable* callable);
   void increase_finished_streams(int amount);
   void dump_unfinished_streams(size_t limit);
+  size_t unfinished_stream_count();
   void zero_latecy_register_event(
       Callable* callable,
       EventType event,
@@ -201,6 +202,7 @@ class Sys : public Callable {
       int cycles);
   int drain_finished_streams();
   int start_ready_streams();
+  int schedule_ready_list_streams();
   void insert_into_ready_list(BaseStream* stream);
   #ifdef PHY_MTP
   void insert_into_running_list(StreamBaseline* stream);

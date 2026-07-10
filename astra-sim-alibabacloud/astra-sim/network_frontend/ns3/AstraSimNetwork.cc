@@ -191,6 +191,29 @@ public:
         expeRecvHash[make_pair(tag, make_pair(t.src, t.dest))] = t;
       }
     } else {
+      pair<int, pair<int, int>> fallback_key;
+      if (find_unique_arrived_recv_by_route(
+              t.src, t.dest, t.count, tag, t, fallback_key)) {
+        uint64_t fallback_count = recvHash[fallback_key];
+        recvHash.erase(fallback_key);
+        auto pending_key =
+            make_pair(make_pair(rank, src), fallback_key.first);
+        auto pending = receiver_pending_queue.find(pending_key);
+        if (pending != receiver_pending_queue.end() &&
+            ehd->flowTag.current_flow_id == -1 &&
+            ehd->flowTag.child_flow_id == -1) {
+          ehd->flowTag = pending->second;
+          receiver_pending_queue.erase(pending);
+        }
+        if (fallback_count > t.count) {
+          recvHash[fallback_key] = fallback_count - t.count;
+        }
+        #ifdef NS3_MTP
+        cs.ExitSection();
+        #endif
+        t.msg_handler(t.fun_arg);
+        goto sim_recv_end_section;
+      }
       if (expeRecvHash.find(make_pair(tag, make_pair(t.src, t.dest))) ==
           expeRecvHash.end()) {
         expeRecvHash[make_pair(tag, make_pair(t.src, t.dest))] = t;

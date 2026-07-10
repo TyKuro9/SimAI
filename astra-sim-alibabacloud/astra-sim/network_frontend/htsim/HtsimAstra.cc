@@ -13,6 +13,7 @@
 #include <sys/types.h>
 
 #include <cstdlib>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -57,6 +58,19 @@ bool ensure_result_dir(const string& path) {
   return system(command.c_str()) == 0;
 }
 
+bool env_enabled(const char* name) {
+  const char* value = getenv(name);
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+size_t env_size_or_default(const char* name, size_t default_value) {
+  const char* value = getenv(name);
+  if (value == nullptr || value[0] == '\0') {
+    return default_value;
+  }
+  return max<size_t>(1, strtoull(value, nullptr, 10));
+}
+
 void maybe_read_network_conf(user_param* param) {
   const char* env_strategy = getenv("HTSIM_ROUTE_STRATEGY");
   if (env_strategy != nullptr && env_strategy[0] != '\0') {
@@ -95,6 +109,7 @@ void maybe_read_network_conf(user_param* param) {
       continue;
     }
     if (value == "single" || value == "ecmp" ||
+        value == "ns3_ecmp" ||
         value == "spray_rr" || value == "spray_incremental" ||
         value == "spray_oblivious" || value == "spray_plb" ||
         value == "plb" || value == "spray_reps" ||
@@ -114,7 +129,7 @@ int parse_user_param(int argc, char* argv[], user_param* param) {
         cout << "-n    network topology file" << endl;
         cout << "-c    network config file" << endl;
         cout << "-o    result directory for EndToEnd.csv" << endl;
-        cout << "-r    route_strategy: single|ecmp|spray_rr|spray_incremental|spray_oblivious|spray_plb|spray_reps" << endl;
+        cout << "-r    route_strategy: single|ecmp|ns3_ecmp|spray_rr|spray_incremental|spray_oblivious|spray_plb|spray_reps" << endl;
         return 1;
       case 't':
         param->thread = stoi(optarg);
@@ -228,18 +243,65 @@ int main(int argc, char* argv[]) {
   cout << "SimAI begin run htsim route_strategy=" << htsim_route_strategy()
        << " packet_level=" << (htsim_packet_level_enabled() ? 1 : 0)
        << endl;
-  htsim_run();
+  auto dump_astra_watchdog = [&systems]() {
+    if (!env_enabled("HTSIM_WATCHDOG_DUMP_ASTRA")) {
+      return;
+    }
+    const size_t rank_limit =
+        env_size_or_default("HTSIM_WATCHDOG_ASTRA_RANKS", 4);
+    const size_t stream_limit =
+        env_size_or_default("HTSIM_WATCHDOG_ASTRA_STREAMS", 4);
+    size_t dumped = 0;
+    for (auto* system : systems) {
+      if (system == nullptr || system->unfinished_stream_count() == 0) {
+        continue;
+      }
+      system->dump_unfinished_streams(stream_limit);
+      dumped++;
+      if (dumped >= rank_limit) {
+        break;
+      }
+    }
+    if (dumped == 0) {
+      cout << "[htsim watchdog] ASTRA has no unfinished streams" << endl;
+    }
+  };
+
+  htsim_run(dump_astra_watchdog);
 
   auto rank0_reported = [&systems]() {
     return !systems.empty() && systems[0] != nullptr &&
         systems[0]->workload_reported;
   };
+  auto dump_unfinished_astra = [&systems](size_t rank_limit, size_t stream_limit) {
+    size_t dumped = 0;
+    for (auto* system : systems) {
+      if (system == nullptr) {
+        continue;
+      }
+      size_t unfinished = system->unfinished_stream_count();
+      if (unfinished == 0) {
+        continue;
+      }
+      cerr << "[htsim] unfinished ASTRA rank " << system->id
+           << " pending_items " << unfinished << endl;
+      system->dump_unfinished_streams(stream_limit);
+      dumped++;
+      if (dumped >= rank_limit) {
+        cerr << "[htsim] truncated unfinished ASTRA rank dump" << endl;
+        break;
+      }
+    }
+  };
 
   int drained_streams = 0;
+  int scheduled_streams = 0;
   int started_streams = 0;
   int flushed_events = 0;
+  bool final_drain_failed = false;
   while (!rank0_reported()) {
     drained_streams = 0;
+    scheduled_streams = 0;
     started_streams = 0;
     flushed_events = 0;
     for (auto* system : systems) {
@@ -250,7 +312,17 @@ int main(int argc, char* argv[]) {
     if (drained_streams > 0) {
       cout << "[htsim] Drained " << drained_streams
            << " finished streams after event queue became empty" << endl;
-      htsim_run();
+      htsim_run(dump_astra_watchdog);
+    }
+    for (auto* system : systems) {
+      if (system != nullptr) {
+        scheduled_streams += system->schedule_ready_list_streams();
+      }
+    }
+    if (scheduled_streams > 0) {
+      cout << "[htsim] Scheduled " << scheduled_streams
+           << " ready-list streams after event queue became empty" << endl;
+      htsim_run(dump_astra_watchdog);
     }
     for (auto* system : systems) {
       if (system != nullptr) {
@@ -260,7 +332,7 @@ int main(int argc, char* argv[]) {
     if (started_streams > 0) {
       cout << "[htsim] Started " << started_streams
            << " ready streams after event queue became empty" << endl;
-      htsim_run();
+      htsim_run(dump_astra_watchdog);
     }
     for (auto* system : systems) {
       if (system != nullptr) {
@@ -271,17 +343,22 @@ int main(int argc, char* argv[]) {
       cout << "[htsim] Flushed " << flushed_events
            << " pending ASTRA event batches after event queue became empty"
            << endl;
-      htsim_run();
+      htsim_run(dump_astra_watchdog);
     }
     if (rank0_reported()) {
       break;
     }
-    if (drained_streams == 0 && started_streams == 0 && flushed_events == 0) {
+    if (drained_streams == 0 && scheduled_streams == 0 &&
+        started_streams == 0 && flushed_events == 0) {
+      cerr << "[htsim] Final drain stalled before workload report" << endl;
+      htsim_dump_pending_state(32);
+      dump_unfinished_astra(32, 8);
+      final_drain_failed = true;
       break;
     }
   }
 
   htsim_destroy();
   cout << "SimAI-htsim finished." << endl;
-  return 0;
+  return final_drain_failed ? 2 : 0;
 }

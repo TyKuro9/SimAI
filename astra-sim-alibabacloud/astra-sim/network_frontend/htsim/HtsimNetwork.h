@@ -9,7 +9,9 @@
 #include "astra-sim/system/AstraNetworkAPI.hh"
 #include "astra-sim/system/Common.hh"
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <queue>
 #include <string>
@@ -76,9 +78,10 @@ void htsim_schedule_flow_completion(
     int dst,
     uint64_t count,
     const AstraSim::ncclFlowTag& flowTag);
-void htsim_run();
+void htsim_run(const std::function<void()>& watchdog_callback = nullptr);
 void htsim_stop();
 void htsim_destroy();
+void htsim_dump_pending_state(std::size_t limit = 16);
 
 extern std::map<std::pair<std::pair<int, int>, int>, AstraSim::ncclFlowTag>
     receiver_pending_queue;

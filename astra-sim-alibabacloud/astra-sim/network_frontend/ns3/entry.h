@@ -19,6 +19,7 @@
 #undef PGO_TRAINING
 #define PATH_TO_PGO_CONFIG "path_to_pgo_config"
 #define _QPS_PER_CONNECTION_  1
+#include <algorithm>
 #include "common.h"
 #include "ns3/applications-module.h"
 #include "ns3/core-module.h"
@@ -72,6 +73,109 @@ map<std::pair<int,std::pair<int,int>>,int> waiting_to_sent_callback;
 map<std::pair<int,std::pair<int,int>>,int>waiting_to_notify_receiver;
 map<std::pair<int,std::pair<int,int>>,uint64_t>received_chunksize;  
 map<std::pair<int,std::pair<int,int>>,uint64_t>sent_chunksize;  
+
+bool fallback_task_accepts_flow_tag(
+    const task1& task,
+    const AstraSim::ncclFlowTag& flowTag) {
+  auto* ehd =
+      static_cast<AstraSim::RecvPacketEventHadndlerData*>(task.fun_arg);
+  if (ehd == nullptr) {
+    return true;
+  }
+  const AstraSim::ncclFlowTag& expected = ehd->flowTag;
+  if (expected.receiver_node >= 0 &&
+      flowTag.receiver_node != expected.receiver_node) {
+    return false;
+  }
+  if (expected.channel_id >= 0 && flowTag.channel_id != expected.channel_id) {
+    return false;
+  }
+  if (expected.tree_flow_list.empty() || flowTag.tree_flow_list.empty()) {
+    return true;
+  }
+  for (int next_flow_id : flowTag.tree_flow_list) {
+    if (next_flow_id == -1) {
+      continue;
+    }
+    if (std::find(
+            expected.tree_flow_list.begin(),
+            expected.tree_flow_list.end(),
+            next_flow_id) == expected.tree_flow_list.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool find_unique_expected_recv_by_route(
+    int src,
+    int dst,
+    uint64_t count,
+    int reference_tag,
+    const AstraSim::ncclFlowTag& flowTag,
+    pair<int, pair<int, int>>& found_key,
+    task1& found_task) {
+  bool found = false;
+  long long best_diff = 0;
+  for (const auto& item : expeRecvHash) {
+    if (item.first.second.first != src || item.first.second.second != dst ||
+        item.second.count != count ||
+        !fallback_task_accepts_flow_tag(item.second, flowTag)) {
+      continue;
+    }
+    long long diff = item.first.first > reference_tag
+        ? static_cast<long long>(item.first.first) - reference_tag
+        : static_cast<long long>(reference_tag) - item.first.first;
+    if (found && diff == best_diff) {
+      return false;
+    }
+    if (found && diff > best_diff) {
+      continue;
+    }
+    found = true;
+    best_diff = diff;
+    found_key = item.first;
+    found_task = item.second;
+  }
+  return found;
+}
+
+bool find_unique_arrived_recv_by_route(
+    int src,
+    int dst,
+    uint64_t count,
+    int reference_tag,
+    const task1& expected_task,
+    pair<int, pair<int, int>>& found_key) {
+  bool found = false;
+  long long best_diff = 0;
+  for (const auto& item : recvHash) {
+    if (item.first.second.first != src || item.first.second.second != dst ||
+        item.second != count) {
+      continue;
+    }
+    auto pending_it = receiver_pending_queue.find(
+        make_pair(make_pair(dst, src), item.first.first));
+    if (pending_it == receiver_pending_queue.end() ||
+        !fallback_task_accepts_flow_tag(expected_task, pending_it->second)) {
+      continue;
+    }
+    long long diff = item.first.first > reference_tag
+        ? static_cast<long long>(item.first.first) - reference_tag
+        : static_cast<long long>(reference_tag) - item.first.first;
+    if (found && diff == best_diff) {
+      return false;
+    }
+    if (found && diff > best_diff) {
+      continue;
+    }
+    found = true;
+    best_diff = diff;
+    found_key = item.first;
+  }
+  return found;
+}
+
 bool is_sending_finished(int src,int dst,AstraSim::ncclFlowTag flowTag){
   int tag_id = flowTag.current_flow_id;
   if (waiting_to_sent_callback.count(
@@ -206,6 +310,30 @@ void notify_receiver_receive_data(int sender_node, int receiver_node,
         expeRecvHash[make_pair(tag, make_pair(sender_node, receiver_node))] = t2;
       }
     } else {
+      pair<int, pair<int, int>> fallback_key;
+      task1 fallback_task;
+      if (find_unique_expected_recv_by_route(
+              sender_node,
+              receiver_node,
+              message_size,
+              tag,
+              flowTag,
+              fallback_key,
+              fallback_task)) {
+        auto* fallback_ehd =
+            static_cast<AstraSim::RecvPacketEventHadndlerData*>(
+                fallback_task.fun_arg);
+        expeRecvHash.erase(fallback_key);
+        if (fallback_ehd->flowTag.current_flow_id == -1 &&
+            fallback_ehd->flowTag.child_flow_id == -1) {
+          fallback_ehd->flowTag = flowTag;
+        }
+        #ifdef NS3_MTP
+        cs.ExitSection();
+        #endif
+        fallback_task.msg_handler(fallback_task.fun_arg);
+        goto receiver_end_1st_section;
+      }
       receiver_pending_queue[std::make_pair(std::make_pair(receiver_node, sender_node),tag)] = flowTag;
       if (recvHash.find(make_pair(tag, make_pair(sender_node, receiver_node))) ==
           recvHash.end()) {
