@@ -32,7 +32,7 @@ index 17ccd02..f068548 100755
  
          path_refcounts[src][dest]--;
 diff --git a/sim/roce.cpp b/sim/roce.cpp
-index ba82072..694194b 100755
+index ba82072..45710a0 100755
 --- a/sim/roce.cpp
 +++ b/sim/roce.cpp
 @@ -9,6 +9,14 @@
@@ -316,7 +316,7 @@ index ba82072..694194b 100755
 +        }
      }
  }
-
+ 
 @@ -238,8 +421,10 @@ void RoceSrc::receivePacket(Packet& pkt)
          _stop_time = 0;
      }
@@ -346,7 +346,7 @@ index ba82072..694194b 100755
 @@ -302,6 +488,53 @@ void RoceSrc::send_packet() {
      p->sendOn();
  }
-
+ 
 +bool RoceSrc::recover_oldest_unacked() {
 +    if (!_flow_started || _done || _sink == NULL || _flow_size == 0 ||
 +        _last_acked >= _flow_size) {
@@ -448,9 +448,71 @@ index ba82072..694194b 100755
 +            return;
 +        }
      }
-
+ 
      simtime_picosec next_send = _time_last_sent + _packet_spacing;
-@@ -446,7 +711,3 @@ void RoceSink::send_nack(simtime_picosec ts, RocePacket::seq_t ackno) {
+@@ -372,6 +637,44 @@ void RoceSink::connect(RoceSrc& src, Route* route)
+     _route = route;
+     _cumulative_ack = 0;
+     _drops = 0;
++    _received_intervals.clear();
++}
++
++void RoceSink::buffer_received_range(
++    RocePacket::seq_t first, RocePacket::seq_t last) {
++    if (last <= _cumulative_ack) {
++        return;
++    }
++    first = max<RocePacket::seq_t>(first, _cumulative_ack + 1);
++
++    map<RocePacket::seq_t, RocePacket::seq_t>::iterator next =
++        _received_intervals.lower_bound(first);
++    if (next != _received_intervals.begin()) {
++        map<RocePacket::seq_t, RocePacket::seq_t>::iterator previous = next;
++        --previous;
++        if (previous->second >= first - 1) {
++            first = previous->first;
++            last = max(last, previous->second);
++            next = _received_intervals.erase(previous);
++        }
++    }
++    while (next != _received_intervals.end() && next->first <= last + 1) {
++        last = max(last, next->second);
++        next = _received_intervals.erase(next);
++    }
++    _received_intervals[first] = last;
++}
++
++void RoceSink::advance_cumulative_ack() {
++    while (!_received_intervals.empty()) {
++        map<RocePacket::seq_t, RocePacket::seq_t>::iterator next =
++            _received_intervals.begin();
++        if (next->first > _cumulative_ack + 1) {
++            break;
++        }
++        _cumulative_ack = max(_cumulative_ack, next->second);
++        _received_intervals.erase(next);
++    }
+ }
+ 
+ 
+@@ -403,6 +706,8 @@ void RoceSink::receivePacket(Packet& pkt) {
+     //bool last_packet = ((RocePacket*)&pkt)->last_packet();
+ 
+     if (seqno > _cumulative_ack+1){
++        buffer_received_range(
++            seqno, seqno + p->size() - RocePacket::ACKSIZE - 1);
+         send_nack(ts,_cumulative_ack);  
+         pkt.flow().logTraffic(pkt,*this,TrafficLogger::PKT_RCVDESTROY);
+ 
+@@ -416,6 +721,7 @@ void RoceSink::receivePacket(Packet& pkt) {
+ 
+     if (seqno == _cumulative_ack+1) { // it's the next expected seq no
+         _cumulative_ack = seqno + size - 1;
++        advance_cumulative_ack();
+     } else if (seqno < _cumulative_ack+1) {
+         //must have been a bad retransmit
+     }
+@@ -446,7 +752,3 @@ void RoceSink::send_nack(simtime_picosec ts, RocePacket::seq_t ackno) {
      nack->set_ts(ts);
      nack->sendOn();
  }
@@ -459,7 +521,7 @@ index ba82072..694194b 100755
 -
 -
 diff --git a/sim/roce.h b/sim/roce.h
-index 4796dda..e22ca8b 100755
+index 4796dda..2ec3b8f 100755
 --- a/sim/roce.h
 +++ b/sim/roce.h
 @@ -10,6 +10,8 @@
@@ -550,7 +612,19 @@ index 4796dda..e22ca8b 100755
      bool _done;
  };
  
-@@ -192,4 +227,3 @@ private:
+@@ -184,12 +219,15 @@ private:
+     //packet in the connection (or 0 if not known)
+     uint64_t _total_received;
+     RocePacket::seq_t _highest_seqno;
++    map<RocePacket::seq_t, RocePacket::seq_t> _received_intervals;
+  
+     // Mechanism
++    void buffer_received_range(
++        RocePacket::seq_t first, RocePacket::seq_t last);
++    void advance_cumulative_ack();
+     void send_ack(simtime_picosec ts);
+     void send_nack(simtime_picosec ts, RocePacket::seq_t ackno);
+ };
  
  
  #endif

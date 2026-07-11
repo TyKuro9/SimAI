@@ -58,6 +58,7 @@
   - `spray_reps` / `reps`: source-side REPS-inspired strategy that explores paths in the first window, then recycles a bounded FIFO of paths that recently received good ACK/RTT feedback; falls back to random path selection when no good path is cached.
 - htsim native `datacenter/htsim_roce` now accepts multi-path strategies such as `-strat perm` for RoCE instead of aborting.
 - ACK/NACK packets still use the stable reverse route configured on the sink.
+- `RoceSink` maintains a compressed map of received out-of-order byte intervals. It still NACKs a gap, but no longer discards later data; receipt of the missing range advances the cumulative ACK through every now-contiguous buffered interval. This is required by packet-level REPS/Spray on unequal-delay paths and avoids repeated Go-Back-N retransmission of data already delivered.
 - `ns3_ecmp` also enables htsim RoCE tail RTO recovery by default. This compensates for htsim RoCE's lack of a real timeout path when a final/tail packet is dropped and no later packet exists to trigger a sink NACK. This is deliberately scoped to `ns3_ecmp` unless overridden by `HTSIM_ROCE_TAIL_RTO`.
 - `spray_plb` formal runs keep `HTSIM_ROCE_TAIL_RTO=0`. After the final workload pass, `htsim_run()` samples flow-completion and sink cumulative-ACK progress while events are still executing. If neither changes for the configured window, only the active sources are switched from normal NACK Go-Back-N to final recovery.
 - During a final-recovery campaign, newly created sources send their first packet normally and then join ACK-gated recovery. This preserves a nonzero cumulative-ACK starting point without letting each callback-created batch run another expensive Go-Back-N livelock cycle.
@@ -167,6 +168,11 @@
   - With route pacing, the Meta 64 MiB reproducer exited 0 with 58881 FCT lines, 12 EndToEnd lines, JCT `54682.702 us`, 809 recovery rounds, and 32.84s wall time. The HPN 256 MiB reproducer exited 0 with 58993 FCT lines, 12 EndToEnd lines, JCT `204440.738 us`, 22368 recovery rounds, and 3:01.99 wall time.
   - One-MiB smokes logged the intended route domains and rates: Meta scale-out 400 Gbps, HPN scale-out 200 Gbps, and scale-up 3600 Gbps. An HPN `ecmp` smoke also exited 0 without final recovery, confirming the fixed-per-flow path mode.
   - HPN still requires substantial recovery under `spray_plb`; correct injection pacing reduces the mismatch but does not remove packet reordering from PLB path changes or add a receiver reorder buffer.
+- Receiver reorder-buffer verification on 2026-07-11:
+  - The full HPN `spray_reps` run without receiver reordering issued all 1262 layers and reached the two final scale-out streams, then stopped making FCT progress at 36,019,645 rows while consuming one CPU core. It was stopped without JCT.
+  - HPN 1 MiB `spray_reps` exited 0 with 15 EndToEnd rows, 144,801 FCT rows, and the expected 3600/200 Gbps scale-up/scale-out pacing logs.
+  - HPN 256 MiB core-7 `spray_reps` exited 0 with 12 EndToEnd rows, 58,624 FCT rows, JCT `165421.928 us`, 2:00.36 wall time, and about 519 MB maximum RSS. It required neither event-loop stall handoff nor final recovery.
+  - Meta 64 MiB core-7 `spray_plb` remained at the established baseline: exit 0, 12 EndToEnd rows, 58,881 FCT rows, 809 final-recovery rounds, JCT `54682.691 us`, and 32.83s wall time.
 - htsim `ns3_ecmp` tail-stall diagnostics on 2026-07-06:
   - Added diagnostic helpers under `experiments/cross_backend_dense256_meta_20260624_114003/`: `make_htsim_repro_workloads.py` and `run_htsim_ns3_ecmp_diagnostics.sh`.
   - `dense256_cap256m_core7` is the compact reproducer: old `ecmp` exits 0 with 12 rows and `all passes finished at time: 54483474`; original `ns3_ecmp` times out after 420s with 0 rows.

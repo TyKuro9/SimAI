@@ -251,6 +251,14 @@
 - Initialized the native RoCE route RNG from `_global_node_count` before assigning/incrementing `_node_num`, removing the previous read of an uninitialized member while preserving deterministic per-flow entropy.
 - Verification: Meta 64 MiB exited 0 with 58881 FCT rows and JCT `54682.702 us`; HPN 256 MiB exited 0 with 58993 FCT rows and JCT `204440.738 us`. One-MiB smokes logged scale-up 3600 Gbps, Meta scale-out 400 Gbps, and HPN scale-out 200 Gbps. HPN `ecmp` completed without final recovery; HPN `spray_plb` still needed recovery because path switching can reorder packets.
 
+### 2026-07-11: Buffer Out-of-Order HTSim RoCE Data
+
+- Root cause: packet-level `spray_reps` can put consecutive packets from one flow on HPN paths with different queueing delay. The native `RoceSink` previously NACKed and discarded every packet beyond the cumulative-ACK gap. Go-Back-N then retransmitted the suffix on paths selected by REPS again, allowing the same reordering cycle to keep the event queue nonempty indefinitely.
+- Added a per-sink map of merged received-byte intervals. Out-of-order data is logged and freed normally but retained logically; when the missing range arrives, the sink advances its cumulative ACK through all contiguous intervals. This compresses long runs of reordered packets and avoids storing packet objects.
+- Kept the existing NACK policy after testing a one-NACK-per-gap variant. Suppressing repeated NACKs made congested Meta flows depend more heavily on final recovery; retaining the original signaling preserved the established Meta baseline.
+- Scope is native HTSim RoCE plus its checked-in build patch only. No NS-3 backend or frontend source was changed.
+- Verification: HPN 1 MiB REPS exited 0 with 15 EndToEnd rows. HPN 256 MiB REPS exited 0 with JCT `165421.928 us`, 58,624 FCT rows, no stall handoff, and no final-recovery rounds. Meta 64 MiB PLB remained at JCT `54682.691 us`, 58,881 FCT rows, and 809 recovery rounds.
+
 ## Ongoing Rule
 
 After each future development change, update:
