@@ -40,6 +40,7 @@
 - htsim is a git submodule fixed to `Broadcom/csg-htsim@841d9e7be46bb968eece766aa4b6c044c7799f67`.
 - The Broadcom submodule is kept at the upstream pin. Native htsim RoCE spray changes are stored in `astra-sim-alibabacloud/build/simai_htsim/htsim_roce_spray.patch` and `astra-sim-alibabacloud/build/simai_htsim/build.sh` applies the patch before compiling if the checked-out submodule has not already been patched.
 - The ASTRA-facing htsim frontend defaults to packet-level RoCE for SimAI topology files. It parses the full SimAI edge list, creates one htsim FIFO `Queue` and one `Pipe` per directed link, and builds cached shortest-path `Route` sets between GPU pairs.
+- Each cached route records its bottleneck link bandwidth. A packet-level `RoceSrc` is paced from its selected route: current same-server routes use 3600 Gbps, Meta scale-out routes use 400 Gbps, and each selected HPN scale-out route uses 200 Gbps.
 - The older flow-level estimator remains available only as a fallback or when `HTSIM_FLOW_LEVEL=1` is set. In that mode only the first-link bandwidth/latency summary is used.
 - The frontend uses htsim `EventList` for scheduling and preserves the NS-3-style `sentHash`, `recvHash`, `expeRecvHash`, and `receiver_pending_queue` callback matching behavior.
 - htsim RoCE `RoceSrc` now supports a vector of routes and selects the next route per data packet for Spray-style transmission.
@@ -48,12 +49,12 @@
 - `RoceSrc` owns the per-flow spray route copies created by `set_paths()` and releases them in its destructor. This is important for long dense runs because `spray_rr` copies up to `HTSIM_MAX_PATHS` routes per flow.
 - Route strategies:
   - `single`: first shortest path for each flow.
-  - `ecmp`: one deterministic hash-selected shortest path per flow.
+  - `ecmp`: one deterministic hash-selected shortest path per flow. The complete flow remains pinned to that route, including on HPN's two-path scale-out topology.
   - `ns3_ecmp`: source-routed approximation of NS-3 switch-side ECMP; each flow builds a shortest forward route by hashing the flow key independently at each hop over next hops that move closer to the destination. ACK/NACK return traffic uses a stable reverse shortest path rather than a second independently hashed per-hop path.
   - `spray_rr`: deterministic round-robin over the cached shortest-path set for data packets.
   - `spray_incremental`: explicit alias for deterministic round-robin/incremental packet spraying.
   - `spray_oblivious`: deterministic per-flow RNG chooses a path independently for each data packet.
-  - `spray_plb` / `plb`: source-side PLB-style strategy that keeps one active path and reroutes it when NACK or RTT-above-base feedback marks the path congested.
+  - `spray_plb` / `plb`: source-side PLB-style strategy that keeps one active path and reroutes it when NACK or RTT-above-base feedback marks the path congested. It does not transmit concurrently on multiple paths, but it is not flow-pinned.
   - `spray_reps` / `reps`: source-side REPS-inspired strategy that explores paths in the first window, then recycles a bounded FIFO of paths that recently received good ACK/RTT feedback; falls back to random path selection when no good path is cached.
 - htsim native `datacenter/htsim_roce` now accepts multi-path strategies such as `-strat perm` for RoCE instead of aborting.
 - ACK/NACK packets still use the stable reverse route configured on the sink.
@@ -162,7 +163,10 @@
   - 256 Meta 64 MiB core reproducer remained bit-for-bit stable at the result level: exit 0, 58881 FCT lines, 12 EndToEnd lines, JCT `54762.490 us`, 808 recovery rounds, wall 31.90s, and maximum RSS about 386 MB.
   - 256 HPN 256 MiB core-7 reproducer used a deliberately smaller 32768 consecutive-no-completion budget and exited 0. It completed after 22352 total recovery rounds, wrote 58673 FCT lines and 12 EndToEnd lines, reported JCT `207327.981 us`, and took 2:53.75 wall time with about 781 MB maximum RSS.
   - The HPN log shows `no_completion_rounds` repeatedly returning near zero while the total round count keeps increasing, directly verifying that complete-flow progress refreshes the recovery budget.
-  - A sender-rate bottleneck-pacing experiment was reverted because it changed ASTRA callback/tag ordering in the Meta regression. Sender pacing remains unchanged in this fix.
+  - An earlier sender-rate pacing trial was reverted while the callback-order regression was unresolved. After final-recovery handoff and deterministic route-RNG initialization were stabilized, selected-route bottleneck pacing was reintroduced successfully.
+  - With route pacing, the Meta 64 MiB reproducer exited 0 with 58881 FCT lines, 12 EndToEnd lines, JCT `54682.702 us`, 809 recovery rounds, and 32.84s wall time. The HPN 256 MiB reproducer exited 0 with 58993 FCT lines, 12 EndToEnd lines, JCT `204440.738 us`, 22368 recovery rounds, and 3:01.99 wall time.
+  - One-MiB smokes logged the intended route domains and rates: Meta scale-out 400 Gbps, HPN scale-out 200 Gbps, and scale-up 3600 Gbps. An HPN `ecmp` smoke also exited 0 without final recovery, confirming the fixed-per-flow path mode.
+  - HPN still requires substantial recovery under `spray_plb`; correct injection pacing reduces the mismatch but does not remove packet reordering from PLB path changes or add a receiver reorder buffer.
 - htsim `ns3_ecmp` tail-stall diagnostics on 2026-07-06:
   - Added diagnostic helpers under `experiments/cross_backend_dense256_meta_20260624_114003/`: `make_htsim_repro_workloads.py` and `run_htsim_ns3_ecmp_diagnostics.sh`.
   - `dense256_cap256m_core7` is the compact reproducer: old `ecmp` exits 0 with 12 rows and `all passes finished at time: 54483474`; original `ns3_ecmp` times out after 420s with 0 rows.

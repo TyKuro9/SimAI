@@ -63,6 +63,7 @@ simtime_picosec base_latency_ps = kDefaultLinkLatencyPs;
 bool htsim_stopped = false;
 bool packet_level_enabled = true;
 bool final_recovery_campaign_active = false;
+set<pair<bool, uint64_t>> reported_source_pacing;
 EventList htsim_eventlist;
 vector<unique_ptr<EventSource>> owned_events;
 size_t completed_flows_since_reclaim = 0;
@@ -258,33 +259,35 @@ class SimaiPacketTopology {
     routes.reserve(node_paths.size());
     for (size_t i = 0; i < node_paths.size(); i++) {
       unique_ptr<Route> route(new Route());
+      uint64_t bottleneck_gbps = numeric_limits<uint64_t>::max();
       for (size_t hop = 0; hop + 1 < node_paths[i].size(); hop++) {
         EdgeKey edge{node_paths[i][hop], node_paths[i][hop + 1]};
         auto q = queues.find(edge);
         auto p = pipes.find(edge);
-        if (q == queues.end() || p == pipes.end()) {
+        auto link = links.find(edge);
+        if (q == queues.end() || p == pipes.end() || link == links.end()) {
           throw runtime_error("missing htsim directed edge while building route");
         }
+        bottleneck_gbps =
+            min<uint64_t>(bottleneck_gbps, link->second.bandwidth_gbps);
         route->push_back(q->second.get());
         route->push_back(p->second.get());
       }
       route->set_path_id(static_cast<int>(i), static_cast<int>(node_paths.size()));
       routes.push_back(route.get());
+      route_bottleneck_gbps[route.get()] = bottleneck_gbps;
       owned_routes.push_back(std::move(route));
     }
     return &routes;
   }
 
-  linkspeed_bps sender_rate(int src, int dst) const {
-    if (src >= 0 && src < static_cast<int>(adjacency.size())) {
-      for (int next : adjacency[src]) {
-        auto link = links.find(EdgeKey{src, next});
-        if (link != links.end()) {
-          return speedFromGbps(static_cast<double>(link->second.bandwidth_gbps));
-        }
-      }
+  uint64_t route_rate_gbps(const Route* route) const {
+    auto rate = route_bottleneck_gbps.find(route);
+    if (rate != route_bottleneck_gbps.end() &&
+        rate->second != numeric_limits<uint64_t>::max()) {
+      return rate->second;
     }
-    return speedFromGbps(static_cast<double>(default_bandwidth_gbps));
+    return default_bandwidth_gbps;
   }
 
   unique_ptr<Route> build_ns3_ecmp_route(
@@ -494,6 +497,7 @@ class SimaiPacketTopology {
   map<EdgeKey, unique_ptr<Queue>> queues;
   map<EdgeKey, unique_ptr<Pipe>> pipes;
   vector<unique_ptr<Route>> owned_routes;
+  map<const Route*, uint64_t> route_bottleneck_gbps;
   map<pair<int, int>, vector<const Route*>> path_cache;
   map<int, vector<int>> distance_cache;
 };
@@ -1182,7 +1186,17 @@ bool schedule_roce_packet_flow(
   flow->dst_node = dst;
   flow->bytes = count;
   flow->flowTag = flowTag;
-  linkspeed_bps rate = packet_topology->sender_rate(src, dst);
+  uint64_t route_rate_gbps =
+      packet_topology->route_rate_gbps(paths_out->at(choice));
+  bool scale_up = gpus_per_server > 0 &&
+      src / static_cast<int>(gpus_per_server) ==
+          dst / static_cast<int>(gpus_per_server);
+  if (reported_source_pacing.insert({scale_up, route_rate_gbps}).second) {
+    cout << "[htsim] source pacing domain="
+         << (scale_up ? "scale_up" : "scale_out")
+         << " route_bottleneck_gbps=" << route_rate_gbps << endl;
+  }
+  linkspeed_bps rate = speedFromGbps(static_cast<double>(route_rate_gbps));
   flow->src.reset(new RoceSrc(nullptr, nullptr, htsim_eventlist, rate));
   flow->sink.reset(new RoceSink());
   if (route_strategy_value == "spray_oblivious") {
@@ -1604,6 +1618,7 @@ void htsim_destroy() {
   packet_topology.reset();
   owned_events.clear();
   final_recovery_campaign_active = false;
+  reported_source_pacing.clear();
 }
 
 HtsimNetwork::HtsimNetwork(int rank, int npu_offset)

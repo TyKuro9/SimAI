@@ -240,8 +240,16 @@
 - Added event-loop sampling of complete-flow and sink cumulative-ACK progress after the final workload pass. A configured no-progress window freezes only the currently active sources and suppresses further Go-Back-N rewinds before oldest-unacked recovery begins.
 - Flows created by later completion callbacks are not frozen before sending. During an active recovery campaign they send one initial packet, then join ACK-gated recovery; this avoids both cumulative-ACK-zero deadlock and repeated million-event stall-detection cycles.
 - `HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS` is a consecutive-no-flow-completion budget, reset whenever any flow completes. This allows finite multi-stage callback chains to continue while still bounding a genuinely non-progressing recovery plateau.
-- Kept original sender pacing. A shortest-path bottleneck pacing trial was reverted after the Meta callback/tag-order regression failed.
+- An earlier shortest-path bottleneck pacing trial was reverted while the Meta callback/tag-order regression was unresolved. Route-bottleneck pacing was reintroduced and verified separately after final-recovery handoff and route-RNG stabilization.
 - Verification: Meta 64 MiB core remained exit 0 with 58881 FCT lines and JCT `54762.490 us`. HPN 256 MiB core-7 exited 0 with 58673 FCT lines, 12 EndToEnd lines, JCT `207327.981 us`, and 22352 total recovery rounds under a 32768 consecutive-no-completion budget.
+
+### 2026-07-11: Pace HTSim Sources from the Selected Route Domain
+
+- NS-3 creates a `QbbNetDevice` at each topology link's configured data rate. RDMA QPs use the NVSwitch device for same-server traffic and one hash-selected scale-out NIC for cross-server traffic; QP pacing uses that selected device's rate. Multiple QPs may aggregate over HPN's two 200 Gbps uplinks, but one QP is paced at 200 Gbps rather than 400 Gbps.
+- Changed only the HTSim frontend and native HTSim patch. Each cached shortest route records its bottleneck link bandwidth, and `RoceSrc` is constructed at the selected route's rate instead of the first adjacency of the source node. No NS-3 source file was modified.
+- Retained the existing route-strategy boundary: `ecmp` deterministically chooses one complete path and pins the flow to it; `spray_plb` uses one path at a time but may reroute after congestion feedback. PLB was not silently converted into ECMP.
+- Initialized the native RoCE route RNG from `_global_node_count` before assigning/incrementing `_node_num`, removing the previous read of an uninitialized member while preserving deterministic per-flow entropy.
+- Verification: Meta 64 MiB exited 0 with 58881 FCT rows and JCT `54682.702 us`; HPN 256 MiB exited 0 with 58993 FCT rows and JCT `204440.738 us`. One-MiB smokes logged scale-up 3600 Gbps, Meta scale-out 400 Gbps, and HPN scale-out 200 Gbps. HPN `ecmp` completed without final recovery; HPN `spray_plb` still needed recovery because path switching can reorder packets.
 
 ## Ongoing Rule
 
