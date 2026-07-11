@@ -160,6 +160,7 @@
   - 256 and 1024 1 MiB scale-table smokes both exited 0 without invoking recovery. They wrote 28673 and 114689 FCT lines respectively; wall times were 3.59s and 32.03s.
   - The uncapped first-10-layer diagnostic reached final recovery round 1706 and grew from about 122k to 124083 FCT rows during the bounded foreground test. It was intentionally interrupted before full completion; this validates ongoing progress but not a completed large-message result.
   - Formal runner: `experiments/htsim_results/run_dense_scale_table_spray_plb.sh`; output root: `experiments/htsim_results/csv/htsim_dense_scale_table_spray_plb_final_recovery_20260710_191503`.
+  - The runner now accepts any supported strategy through `HTSIM_ROUTE_STRATEGY`, an optional comma-separated topology filter through `HTSIM_TOPOLOGIES`, and optional continue-after-failure behavior through `HTSIM_CONTINUE_ON_ERROR=1`. Completed FCT files are gzip-compressed when `HTSIM_COMPRESS_FCT=1`.
 - Post-pass Go-Back-N livelock handoff verification on 2026-07-11:
   - 256 Meta 64 MiB core reproducer remained bit-for-bit stable at the result level: exit 0, 58881 FCT lines, 12 EndToEnd lines, JCT `54762.490 us`, 808 recovery rounds, wall 31.90s, and maximum RSS about 386 MB.
   - 256 HPN 256 MiB core-7 reproducer used a deliberately smaller 32768 consecutive-no-completion budget and exited 0. It completed after 22352 total recovery rounds, wrote 58673 FCT lines and 12 EndToEnd lines, reported JCT `207327.981 us`, and took 2:53.75 wall time with about 781 MB maximum RSS.

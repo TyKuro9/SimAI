@@ -7,7 +7,7 @@ cd "${ROOT}"
 HTSIM_BIN="${HTSIM_BIN:-${ROOT}/bin/SimAI_htsim}"
 ROUTE_STRATEGY="${HTSIM_ROUTE_STRATEGY:-spray_plb}"
 RUN_STAMP="${HTSIM_RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
-OUT_ROOT="${OUT_ROOT:-${ROOT}/experiments/htsim_results/csv/htsim_dense_scale_table_spray_plb_${RUN_STAMP}}"
+OUT_ROOT="${OUT_ROOT:-${ROOT}/experiments/htsim_results/csv/htsim_dense_scale_table_${ROUTE_STRATEGY}_${RUN_STAMP}}"
 FLOW_RECLAIM_BATCH="${HTSIM_FLOW_RECLAIM_BATCH:-262144}"
 TAIL_RTO="${HTSIM_ROCE_TAIL_RTO:-0}"
 MIN_RTO_US="${HTSIM_ROCE_MIN_RTO_US:-20000}"
@@ -17,6 +17,8 @@ STALL_CHECK_EVENTS="${HTSIM_STALL_CHECK_EVENTS:-1048576}"
 STALL_NO_PROGRESS_CHECKS="${HTSIM_STALL_NO_PROGRESS_CHECKS:-8}"
 COMPRESS_FCT="${HTSIM_COMPRESS_FCT:-1}"
 RESUME="${HTSIM_RESUME:-1}"
+TOPOLOGY_FILTER="${HTSIM_TOPOLOGIES:-}"
+CONTINUE_ON_ERROR="${HTSIM_CONTINUE_ON_ERROR:-0}"
 
 WORKLOAD_256="${ROOT}/my_workloads/H100-gpt_22B-world_size256-tp8-dp4-pp8-gbs384-mbs1-seq2048-interleaved3.txt"
 WORKLOAD_1024="${ROOT}/my_workloads/H100-gpt_175B-world_size1024-tp8-dp16-pp8-gbs1536-mbs1-seq4096-interleaved3.txt"
@@ -43,10 +45,14 @@ usage() {
   cat <<'USAGE'
 Usage: run_dense_scale_table_spray_plb.sh [all|256|1024 ...]
 
-Runs the six topologies at each selected scale sequentially with spray_plb.
+Runs the six topologies at each selected scale sequentially. The route strategy
+defaults to spray_plb and can be changed with HTSIM_ROUTE_STRATEGY.
 FCT output is always enabled. Reusing OUT_ROOT skips completed cases.
 
 Environment:
+  HTSIM_ROUTE_STRATEGY  HTSim route strategy, default spray_plb.
+  HTSIM_TOPOLOGIES      Optional comma-separated topology names to run.
+  HTSIM_CONTINUE_ON_ERROR  Continue with later cases after a failure, default 0.
   HTSIM_COMPRESS_FCT  Compress completed fct.txt with gzip, default 1.
   HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS  Consecutive ACK-gated rounds without a
                                     completed flow, default 65536.
@@ -90,7 +96,13 @@ else
   done
 fi
 
-[[ "${ROUTE_STRATEGY}" == "spray_plb" ]] || die "this batch requires spray_plb, got ${ROUTE_STRATEGY}"
+case "${ROUTE_STRATEGY}" in
+  single|ecmp|ns3_ecmp|spray_rr|spray_incremental|spray_oblivious|spray_plb|plb|spray_reps|reps)
+    ;;
+  *)
+    die "unsupported route strategy: ${ROUTE_STRATEGY}"
+    ;;
+esac
 [[ -x "${HTSIM_BIN}" ]] || die "missing executable: ${HTSIM_BIN}"
 require_file "${WORKLOAD_256}" "256 Dense workload"
 require_file "${WORKLOAD_1024}" "1024 Dense workload"
@@ -100,6 +112,7 @@ SUMMARY="${OUT_ROOT}/summary.csv"
 if [[ ! -f "${SUMMARY}" ]]; then
   echo "scale,model,topology,strategy,status,exit_code,start_epoch,end_epoch,endtoend_lines,fct_lines,finish_time,output_dir,log_file" > "${SUMMARY}"
 fi
+failed_cases=0
 
 run_case() {
   local scale="$1"
@@ -204,7 +217,28 @@ run_case() {
   echo "${scale},${model},${topology_name},${ROUTE_STRATEGY},${status},${exit_code},${start_epoch},${end_epoch},${e2e_lines},${fct_lines},${finish_time},${out_dir},${log_file}" >> "${SUMMARY}"
   echo "done ${case_name}: status=${status} exit=${exit_code} e2e=${e2e_lines} fct=${fct_lines} finish_time=${finish_time}"
 
-  [[ "${status}" == "complete" ]] || die "incomplete case ${case_name}; inspect ${log_file}"
+  if [[ "${status}" != "complete" ]]; then
+    failed_cases=$((failed_cases + 1))
+    if [[ "${CONTINUE_ON_ERROR}" != "1" ]]; then
+      die "incomplete case ${case_name}; inspect ${log_file}"
+    fi
+  fi
+}
+
+topology_selected() {
+  local topology_name="$1"
+  local selected=""
+  local selected_topologies=()
+  if [[ -z "${TOPOLOGY_FILTER}" ]]; then
+    return 0
+  fi
+  IFS=',' read -ra selected_topologies <<< "${TOPOLOGY_FILTER}"
+  for selected in "${selected_topologies[@]}"; do
+    if [[ "${selected}" == "${topology_name}" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 for scale in "${selected_scales[@]}"; do
@@ -226,9 +260,17 @@ for scale in "${selected_scales[@]}"; do
 
   for entry in "${topologies[@]}"; do
     IFS='|' read -r topology_name topology config <<< "${entry}"
+    if ! topology_selected "${topology_name}"; then
+      echo "skip filtered ${scale}/${topology_name}"
+      continue
+    fi
     run_case "${scale}" "${model}" "${topology_name}" "${topology}" "${config}" "${workload}"
   done
 done
 
 echo "all selected Dense scale-table HTSim runs completed"
 echo "summary: ${SUMMARY}"
+if [[ "${failed_cases}" -gt 0 ]]; then
+  echo "failed cases: ${failed_cases}" >&2
+  exit 1
+fi
