@@ -12,7 +12,9 @@ FLOW_RECLAIM_BATCH="${HTSIM_FLOW_RECLAIM_BATCH:-262144}"
 TAIL_RTO="${HTSIM_ROCE_TAIL_RTO:-0}"
 MIN_RTO_US="${HTSIM_ROCE_MIN_RTO_US:-20000}"
 FINAL_DRAIN_RECOVERY="${HTSIM_FINAL_DRAIN_RECOVERY:-1}"
-FINAL_DRAIN_RECOVERY_ROUNDS="${HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS:-32768}"
+FINAL_DRAIN_RECOVERY_ROUNDS="${HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS:-65536}"
+STALL_CHECK_EVENTS="${HTSIM_STALL_CHECK_EVENTS:-1048576}"
+STALL_NO_PROGRESS_CHECKS="${HTSIM_STALL_NO_PROGRESS_CHECKS:-8}"
 RESUME="${HTSIM_RESUME:-1}"
 
 DENSE_WORKLOAD="${DENSE_WORKLOAD:-${ROOT}/my_workloads/H100-gpt_22B-world_size256-tp8-pp8-ep1-gbs384-mbs1-seq2048-MOE-False-GEMM-False-flash_attn-False.txt}"
@@ -42,7 +44,10 @@ Environment:
   HTSIM_ROCE_TAIL_RTO      Normal-stage tail RTO, default 0.
   HTSIM_ROCE_MIN_RTO_US    Minimum retransmission timeout, default 20000 us.
   HTSIM_FINAL_DRAIN_RECOVERY        Final-drain recovery, default 1.
-  HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS Maximum recovery rounds, default 32768.
+  HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS Consecutive rounds without a completed flow,
+                                    default 65536.
+  HTSIM_STALL_CHECK_EVENTS  Events between ACK-progress samples, default 1048576.
+  HTSIM_STALL_NO_PROGRESS_CHECKS  Samples before handoff, default 8.
   HTSIM_RESUME             Skip completed cases when 1, default 1.
   DENSE_WORKLOAD           Override the 256-GPU GPT-22B workload.
   MOE_WORKLOAD             Override the 256-GPU Mixtral workload.
@@ -150,6 +155,8 @@ run_case() {
     echo "min_rto_us=${MIN_RTO_US}"
     echo "final_drain_recovery=${FINAL_DRAIN_RECOVERY}"
     echo "final_drain_recovery_rounds=${FINAL_DRAIN_RECOVERY_ROUNDS}"
+    echo "stall_check_events=${STALL_CHECK_EVENTS}"
+    echo "stall_no_progress_checks=${STALL_NO_PROGRESS_CHECKS}"
   } > "${out_dir}/metadata.txt"
 
   local start_epoch
@@ -167,6 +174,8 @@ run_case() {
     HTSIM_ROCE_MIN_RTO_US="${MIN_RTO_US}" \
     HTSIM_FINAL_DRAIN_RECOVERY="${FINAL_DRAIN_RECOVERY}" \
     HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS="${FINAL_DRAIN_RECOVERY_ROUNDS}" \
+    HTSIM_STALL_CHECK_EVENTS="${STALL_CHECK_EVENTS}" \
+    HTSIM_STALL_NO_PROGRESS_CHECKS="${STALL_NO_PROGRESS_CHECKS}" \
     "${HTSIM_BIN}" \
       -w "${workload}" \
       -n "${topology}" \

@@ -32,7 +32,7 @@ index 17ccd02..f068548 100755
  
          path_refcounts[src][dest]--;
 diff --git a/sim/roce.cpp b/sim/roce.cpp
-index ba82072..e693ca5 100755
+index ba82072..4b05c63 100755
 --- a/sim/roce.cpp
 +++ b/sim/roce.cpp
 @@ -9,6 +9,14 @@
@@ -75,11 +75,13 @@ index ba82072..e693ca5 100755
  
      _rtt = 0;
      _rto = timeFromMs(20);
-@@ -74,9 +93,17 @@ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventl
+@@ -74,9 +93,19 @@ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventl
  
      _state_send = READY;
      _time_last_sent = 0;
 +    _last_progress_time = 0;
++    _final_recovery_mode = false;
++    _final_recovery_after_first_send = false;
      _packet_spacing = (simtime_picosec)((Packet::data_packet_size()+RocePacket::ACKSIZE) * (pow(10.0,12.0) * 8) / _bitrate);
  }
  
@@ -93,7 +95,7 @@ index ba82072..e693ca5 100755
  /*mem_b RoceSrc::queuesize(){
    return 0;
    }
-@@ -89,6 +116,18 @@ void RoceSrc::set_traffic_logger(TrafficLogger* pktlogger) {
+@@ -89,6 +118,18 @@ void RoceSrc::set_traffic_logger(TrafficLogger* pktlogger) {
      _flow.set_logger(pktlogger);
  }
  
@@ -112,7 +114,7 @@ index ba82072..e693ca5 100755
  void RoceSrc::log_me() {
      // avoid looping
      if (_log_me == true)
-@@ -101,7 +140,9 @@ void RoceSrc::log_me() {
+@@ -101,7 +142,9 @@ void RoceSrc::log_me() {
  }
  
  void RoceSrc::startflow(){
@@ -123,15 +125,16 @@ index ba82072..e693ca5 100755
      _flow_started = true;
      _highest_sent = 0;
      _last_acked = 0;
-@@ -109,6 +150,7 @@ void RoceSrc::startflow(){
+@@ -109,6 +152,8 @@ void RoceSrc::startflow(){
      _acked_packets = 0;
      _packets_sent = 0;
      _done = false;
 +    _last_progress_time = eventlist().now();
++    _final_recovery_mode = false;
      
      eventlist().sourceIsPendingRel(*this,0);
  }
-@@ -133,6 +175,119 @@ void RoceSrc::connect(Route* routeout, Route* routeback, RoceSink& sink, simtime
+@@ -133,13 +178,138 @@ void RoceSrc::connect(Route* routeout, Route* routeback, RoceSink& sink, simtime
      //else cout << "TRIGGER START " << _nodename << endl; 
  }
  
@@ -251,8 +254,18 @@ index ba82072..e693ca5 100755
  /* Process a NACK.  Generally this involves queuing the NACKed packet
     for retransmission, but then waiting for a PULL to actually resend
     it.  However, sometimes the NACK has the PULL bit set, and then we
-@@ -140,6 +295,8 @@ void RoceSrc::connect(Route* routeout, Route* routeback, RoceSink& sink, simtime
+    resend immediately */
  void RoceSrc::processNack(const RoceNack& nack){
++    if (_final_recovery_mode) {
++        if (nack.ackno() > _last_acked) {
++            _last_acked = nack.ackno();
++        }
++        _last_progress_time = eventlist().now();
++        record_path_feedback(false);
++        _nacks_received++;
++        return;
++    }
++
      _last_acked = nack.ackno();
      _rtx_packets_sent += _highest_sent - _last_acked;
 +    _last_progress_time = eventlist().now();
@@ -260,7 +273,7 @@ index ba82072..e693ca5 100755
  
      if (_log_me)
          cout << "Src " << get_id() << " go back n from " <<  _highest_sent << " to " << _last_acked << " at " << timeAsUs(eventlist().now()) << " us" << endl;
-@@ -164,6 +321,7 @@ void RoceSrc::processAck(const RoceAck& ack) {
+@@ -164,6 +334,7 @@ void RoceSrc::processAck(const RoceAck& ack) {
  
      // Compute rtt.  This comes originally from TCP, and may not be optimal for ROCE */
      uint64_t m = eventlist().now()-ts;
@@ -268,7 +281,7 @@ index ba82072..e693ca5 100755
  
      if (m!=0){
          if (_rtt>0){
-@@ -194,13 +352,22 @@ void RoceSrc::processAck(const RoceAck& ack) {
+@@ -194,13 +365,22 @@ void RoceSrc::processAck(const RoceAck& ack) {
          // the cumulative ack, but we'll get an ACK or NACK anyway in
          // due course.
          _last_acked = ackno;
@@ -292,7 +305,18 @@ index ba82072..e693ca5 100755
          _done = true;
          if (_end_trigger) {
              _end_trigger->activate();
-@@ -238,8 +405,10 @@ void RoceSrc::receivePacket(Packet& pkt)
+@@ -221,7 +401,9 @@ void RoceSrc::processPause(const EthPausePacket& p) {
+         //assert(_state_send != READY);
+         _state_send = READY;
+         //cout << "Source " << str() << " RESUME " << timeAsUs(eventlist().now()) << endl;
+-        eventlist().sourceIsPendingRel(*this,0);
++        if (!_final_recovery_mode) {
++            eventlist().sourceIsPendingRel(*this,0);
++        }
+     }
+ }
+
+@@ -238,8 +420,10 @@ void RoceSrc::receivePacket(Packet& pkt)
          _stop_time = 0;
      }
  
@@ -304,7 +328,7 @@ index ba82072..e693ca5 100755
  
      switch (pkt.type()) {
      case ETH_PAUSE:
-@@ -283,10 +452,11 @@ void RoceSrc::send_packet() {
+@@ -283,10 +467,11 @@ void RoceSrc::send_packet() {
          }
      }
  
@@ -318,10 +342,18 @@ index ba82072..e693ca5 100755
  
      p->flow().logTraffic(*p,*this,TrafficLogger::PKT_CREATESEND);
      p->set_ts(eventlist().now());
-@@ -305,3 +475,27 @@ void RoceSrc::send_packet() {
+@@ -302,6 +487,53 @@ void RoceSrc::send_packet() {
+     p->sendOn();
+ }
+
 +bool RoceSrc::recover_oldest_unacked() {
 +    if (!_flow_started || _done || _sink == NULL || _flow_size == 0 ||
 +        _last_acked >= _flow_size) {
++        return false;
++    }
++
++    _last_acked = max<uint64_t>(_last_acked, _sink->cumulative_ack());
++    if (_last_acked >= _flow_size) {
 +        return false;
 +    }
 +
@@ -343,20 +375,41 @@ index ba82072..e693ca5 100755
 +    return true;
 +}
 +
++bool RoceSrc::enter_final_recovery() {
++    if (_done || _final_recovery_mode) {
++        return false;
++    }
++    _final_recovery_mode = true;
++    _state_send = READY;
++    if (_sink != NULL) {
++        _last_acked = max<uint64_t>(_last_acked, _sink->cumulative_ack());
++    }
++    return true;
++}
++
++void RoceSrc::enter_final_recovery_after_first_send() {
++    if (!_done && !_final_recovery_mode) {
++        _final_recovery_after_first_send = true;
++    }
++}
++
  void RoceSrc::doNextEvent() {
      /*if (!_flow_started){
        startflow();
-@@ -309,6 +503,9 @@ void RoceSrc::doNextEvent() {
+@@ -309,6 +541,12 @@ void RoceSrc::doNextEvent() {
        }*/
  
      assert(_flow_started);
 +    if (_done) {
 +        return;
 +    }
++    if (_final_recovery_mode) {
++        return;
++    }
      if (_log_me) 
          cout << "Src " << get_id() << " do next event\n";
          
-@@ -319,6 +516,27 @@ void RoceSrc::doNextEvent() {
+@@ -319,6 +557,27 @@ void RoceSrc::doNextEvent() {
          return;
      }
  
@@ -384,7 +437,19 @@ index ba82072..e693ca5 100755
      if (_flow_size && _highest_sent >= _flow_size) { 
          if (_log_me) 
              cout << "Src " << get_id()  << " stopping send coz highest_sent is " << _highest_sent << endl;
-@@ -446,7 +664,3 @@ void RoceSink::send_nack(simtime_picosec ts, RocePacket::seq_t ackno) {
+@@ -328,6 +587,11 @@ void RoceSrc::doNextEvent() {
+     if (_time_last_sent==0 || eventlist().now() - _time_last_sent >= _packet_spacing){
+         send_packet();
+         _time_last_sent = eventlist().now();
++        if (_final_recovery_after_first_send) {
++            _final_recovery_after_first_send = false;
++            enter_final_recovery();
++            return;
++        }
+     }
+
+     simtime_picosec next_send = _time_last_sent + _packet_spacing;
+@@ -446,7 +710,3 @@ void RoceSink::send_nack(simtime_picosec ts, RocePacket::seq_t ackno) {
      nack->set_ts(ts);
      nack->sendOn();
  }
@@ -393,7 +458,7 @@ index ba82072..e693ca5 100755
 -
 -
 diff --git a/sim/roce.h b/sim/roce.h
-index 4796dda..b42a9dc 100755
+index 4796dda..e22ca8b 100755
 --- a/sim/roce.h
 +++ b/sim/roce.h
 @@ -10,6 +10,8 @@
@@ -437,7 +502,7 @@ index 4796dda..b42a9dc 100755
  
      virtual void processPause(const EthPausePacket& pkt);
      virtual void processAck(const RoceAck& ack);
-@@ -102,10 +115,25 @@ public:
+@@ -102,10 +115,28 @@ public:
      RoceSink* _sink;
   
      const Route* _route;
@@ -457,13 +522,16 @@ index 4796dda..b42a9dc 100755
  
      void send_packet();
 +    bool recover_oldest_unacked();
++    bool enter_final_recovery();
++    void enter_final_recovery_after_first_send();
++    bool final_recovery_mode() const { return _final_recovery_mode; }
 +    uint32_t random_path_index();
 +    void record_path_feedback(bool good);
 +    void add_reps_good_path(uint32_t path_id);
  
      virtual const string& nodename() { return _nodename; }
      inline uint32_t flow_id() const { return _flow.flow_id();}
-@@ -117,6 +145,7 @@ public:
+@@ -117,6 +148,7 @@ public:
      static uint32_t _global_node_count; 
      static uint32_t _global_rto_count;  // keep track of the total number of timeouts across all srcs
      static simtime_picosec _min_rto;
@@ -471,15 +539,17 @@ index 4796dda..b42a9dc 100755
  
      PacketFlow _flow;
  
-@@ -138,6 +167,7 @@ private:
+@@ -138,6 +170,9 @@ private:
      simtime_picosec _stop_time;
      simtime_picosec _packet_spacing;
      simtime_picosec _time_last_sent;
 +    simtime_picosec _last_progress_time;
++    bool _final_recovery_mode;
++    bool _final_recovery_after_first_send;
      bool _done;
  };
  
-@@ -192,4 +222,3 @@ private:
+@@ -192,4 +227,3 @@ private:
  
  
  #endif

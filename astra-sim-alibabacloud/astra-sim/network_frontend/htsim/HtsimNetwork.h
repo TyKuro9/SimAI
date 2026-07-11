@@ -78,11 +78,15 @@ void htsim_schedule_flow_completion(
     int dst,
     uint64_t count,
     const AstraSim::ncclFlowTag& flowTag);
-void htsim_run(const std::function<void()>& watchdog_callback = nullptr);
+bool htsim_run(
+    const std::function<void()>& watchdog_callback = nullptr,
+    const std::function<bool()>& stall_allowed_callback = nullptr);
 void htsim_stop();
 void htsim_destroy();
 void htsim_dump_pending_state(std::size_t limit = 16);
 std::size_t htsim_recover_stalled_flows(std::size_t limit = 0);
+std::size_t htsim_prepare_final_recovery();
+uint64_t htsim_completed_flow_count();
 
 extern std::map<std::pair<std::pair<int, int>, int>, AstraSim::ncclFlowTag>
     receiver_pending_queue;

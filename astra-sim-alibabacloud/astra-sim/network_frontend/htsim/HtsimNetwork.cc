@@ -62,6 +62,7 @@ uint64_t default_bandwidth_gbps = kDefaultBandwidthGbps;
 simtime_picosec base_latency_ps = kDefaultLinkLatencyPs;
 bool htsim_stopped = false;
 bool packet_level_enabled = true;
+bool final_recovery_campaign_active = false;
 EventList htsim_eventlist;
 vector<unique_ptr<EventSource>> owned_events;
 size_t completed_flows_since_reclaim = 0;
@@ -168,6 +169,7 @@ struct HtsimFlowOwner {
   AstraSim::ncclFlowTag flowTag;
   bool done = false;
   uint64_t completion_sequence = 0;
+  uint64_t last_observed_cumulative_ack = 0;
 };
 
 class SimaiPacketTopology {
@@ -1039,6 +1041,43 @@ size_t htsim_watchdog_sample_limit() {
   return value;
 }
 
+uint64_t htsim_stall_check_event_interval() {
+  static const uint64_t value = []() {
+    const char* interval = getenv("HTSIM_STALL_CHECK_EVENTS");
+    if (interval == nullptr || interval[0] == '\0') {
+      return 1048576ULL;
+    }
+    return strtoull(interval, nullptr, 10);
+  }();
+  return value;
+}
+
+size_t htsim_stall_no_progress_checks() {
+  static const size_t value = []() {
+    const char* checks = getenv("HTSIM_STALL_NO_PROGRESS_CHECKS");
+    if (checks == nullptr || checks[0] == '\0') {
+      return static_cast<size_t>(8);
+    }
+    return max<size_t>(1, strtoull(checks, nullptr, 10));
+  }();
+  return value;
+}
+
+bool observe_cumulative_ack_progress() {
+  bool progressed = false;
+  for (const auto& flow : owned_flows) {
+    if (flow == nullptr || flow->done || flow->sink == nullptr) {
+      continue;
+    }
+    uint64_t cumulative_ack = flow->sink->cumulative_ack();
+    if (cumulative_ack > flow->last_observed_cumulative_ack) {
+      flow->last_observed_cumulative_ack = cumulative_ack;
+      progressed = true;
+    }
+  }
+  return progressed;
+}
+
 void dump_htsim_watchdog_state(uint64_t event_count) {
   size_t active_flows = 0;
   size_t started_flows = 0;
@@ -1193,7 +1232,9 @@ bool schedule_roce_packet_flow(
       paths_out->size() > 1) {
     flow->src->set_paths(paths_out);
   }
-
+  if (final_recovery_campaign_active) {
+    flow->src->enter_final_recovery_after_first_send();
+  }
   owned_flows.push_back(std::move(flow));
   return true;
 }
@@ -1218,6 +1259,28 @@ size_t htsim_recover_stalled_flows(size_t limit) {
     }
   }
   return recovered;
+}
+
+size_t htsim_prepare_final_recovery() {
+  if (!packet_level_enabled) {
+    return 0;
+  }
+
+  final_recovery_campaign_active = true;
+  size_t prepared = 0;
+  for (const auto& flow : owned_flows) {
+    if (flow == nullptr || flow->done || flow->src == nullptr) {
+      continue;
+    }
+    if (flow->src->enter_final_recovery()) {
+      prepared++;
+    }
+  }
+  return prepared;
+}
+
+uint64_t htsim_completed_flow_count() {
+  return completed_flow_sequence;
 }
 
 void htsim_dump_pending_state(size_t limit) {
@@ -1471,9 +1534,16 @@ void htsim_schedule_flow_completion(
   schedule_callback(delay, flow_completion_callback, completion);
 }
 
-void htsim_run(const function<void()>& watchdog_callback) {
+bool htsim_run(
+    const function<void()>& watchdog_callback,
+    const function<bool()>& stall_allowed_callback) {
   const uint64_t watchdog_interval = htsim_watchdog_event_interval();
   uint64_t next_watchdog_event = watchdog_interval;
+  const uint64_t stall_check_interval = htsim_stall_check_event_interval();
+  uint64_t next_stall_check = stall_check_interval;
+  uint64_t observed_completion_sequence = completed_flow_sequence;
+  size_t no_progress_checks = 0;
+  bool stalled = false;
   while (!htsim_stopped && EventList::doNextEvent()) {
     htsim_events_processed++;
     if (completed_flow_sequence >= flow_reclaim_batch_size() &&
@@ -1491,10 +1561,34 @@ void htsim_run(const function<void()>& watchdog_callback) {
       }
       next_watchdog_event += watchdog_interval;
     }
+    if (stall_check_interval > 0 &&
+        htsim_events_processed >= next_stall_check) {
+      bool stall_allowed =
+          stall_allowed_callback != nullptr && stall_allowed_callback();
+      bool progressed = completed_flow_sequence > observed_completion_sequence;
+      observed_completion_sequence = completed_flow_sequence;
+      progressed = observe_cumulative_ack_progress() || progressed;
+      if (!stall_allowed || progressed) {
+        no_progress_checks = 0;
+      } else {
+        no_progress_checks++;
+      }
+      if (stall_allowed &&
+          no_progress_checks >= htsim_stall_no_progress_checks()) {
+        cout << "[htsim] Event loop stalled without cumulative ACK progress"
+             << " events=" << htsim_events_processed
+             << " checks=" << no_progress_checks
+             << " now_ps=" << EventList::now() << endl;
+        stalled = true;
+        break;
+      }
+      next_stall_check += stall_check_interval;
+    }
   }
   htsim_events_processed = 0;
   reclaim_completed_flows();
   reclaim_completed_events();
+  return stalled;
 }
 
 void htsim_stop() {
@@ -1509,6 +1603,7 @@ void htsim_destroy() {
   owned_flows.clear();
   packet_topology.reset();
   owned_events.clear();
+  final_recovery_campaign_active = false;
 }
 
 HtsimNetwork::HtsimNetwork(int rank, int npu_offset)

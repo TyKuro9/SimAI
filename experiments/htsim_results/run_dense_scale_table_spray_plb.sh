@@ -12,7 +12,9 @@ FLOW_RECLAIM_BATCH="${HTSIM_FLOW_RECLAIM_BATCH:-262144}"
 TAIL_RTO="${HTSIM_ROCE_TAIL_RTO:-0}"
 MIN_RTO_US="${HTSIM_ROCE_MIN_RTO_US:-20000}"
 FINAL_DRAIN_RECOVERY="${HTSIM_FINAL_DRAIN_RECOVERY:-1}"
-FINAL_DRAIN_RECOVERY_ROUNDS="${HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS:-32768}"
+FINAL_DRAIN_RECOVERY_ROUNDS="${HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS:-65536}"
+STALL_CHECK_EVENTS="${HTSIM_STALL_CHECK_EVENTS:-1048576}"
+STALL_NO_PROGRESS_CHECKS="${HTSIM_STALL_NO_PROGRESS_CHECKS:-8}"
 COMPRESS_FCT="${HTSIM_COMPRESS_FCT:-1}"
 RESUME="${HTSIM_RESUME:-1}"
 
@@ -46,8 +48,10 @@ FCT output is always enabled. Reusing OUT_ROOT skips completed cases.
 
 Environment:
   HTSIM_COMPRESS_FCT  Compress completed fct.txt with gzip, default 1.
-  HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS  Maximum ACK-gated recovery rounds,
-                                    default 32768.
+  HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS  Consecutive ACK-gated rounds without a
+                                    completed flow, default 65536.
+  HTSIM_STALL_CHECK_EVENTS  Events between ACK-progress samples, default 1048576.
+  HTSIM_STALL_NO_PROGRESS_CHECKS  Samples before handoff, default 8.
 USAGE
 }
 
@@ -137,6 +141,8 @@ run_case() {
     echo "min_rto_us=${MIN_RTO_US}"
     echo "final_drain_recovery=${FINAL_DRAIN_RECOVERY}"
     echo "final_drain_recovery_rounds=${FINAL_DRAIN_RECOVERY_ROUNDS}"
+    echo "stall_check_events=${STALL_CHECK_EVENTS}"
+    echo "stall_no_progress_checks=${STALL_NO_PROGRESS_CHECKS}"
     echo "compress_fct=${COMPRESS_FCT}"
   } > "${out_dir}/metadata.txt"
 
@@ -155,6 +161,8 @@ run_case() {
     HTSIM_ROCE_MIN_RTO_US="${MIN_RTO_US}" \
     HTSIM_FINAL_DRAIN_RECOVERY="${FINAL_DRAIN_RECOVERY}" \
     HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS="${FINAL_DRAIN_RECOVERY_ROUNDS}" \
+    HTSIM_STALL_CHECK_EVENTS="${STALL_CHECK_EVENTS}" \
+    HTSIM_STALL_NO_PROGRESS_CHECKS="${STALL_NO_PROGRESS_CHECKS}" \
     "${HTSIM_BIN}" \
       -w "${workload}" \
       -n "${topology}" \

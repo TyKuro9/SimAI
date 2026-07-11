@@ -232,7 +232,16 @@
 - Each round sends one retransmission from every unfinished flow's cumulative ACK position, drains all resulting HTSim events, and then reassesses progress. It does not change the normal `_highest_sent` cursor.
 - Default recovery is enabled with a 32768-round cap. Progress logging is sparse: first round, every 256 rounds, and whenever the unfinished-flow count changes.
 - Verification: the 256 Meta 64 MiB-tail reproducer exited 0 in 32.09s with 58881 FCT lines after 808 recovery rounds; independent 256/1024 1 MiB smokes exited 0 without recovery.
-- The formal 12-case 256/1024 Dense `spray_plb` FCT batch runs sequentially in tmux session `htsim_dense_scale_plb_fct_final_20260710`, output root `experiments/htsim_results/csv/htsim_dense_scale_table_spray_plb_final_recovery_20260710_191503`.
+- The formal 12-case 256/1024 Dense `spray_plb` FCT batch was started sequentially in tmux session `htsim_dense_scale_plb_fct_final_20260710`, output root `experiments/htsim_results/csv/htsim_dense_scale_table_spray_plb_final_recovery_20260710_191503`. It was later stopped for the HPN livelock investigation.
+
+### 2026-07-11: Hand Off Post-Pass HTSim Go-Back-N Livelock
+
+- Root cause: HPN `spray_plb` could keep the HTSim event queue nonempty forever because out-of-order packets caused sink NACKs and normal `RoceSrc::processNack()` repeatedly rewound `_highest_sent` to the cumulative ACK. The old recovery path only ran after the event queue emptied, so it was unreachable.
+- Added event-loop sampling of complete-flow and sink cumulative-ACK progress after the final workload pass. A configured no-progress window freezes only the currently active sources and suppresses further Go-Back-N rewinds before oldest-unacked recovery begins.
+- Flows created by later completion callbacks are not frozen before sending. During an active recovery campaign they send one initial packet, then join ACK-gated recovery; this avoids both cumulative-ACK-zero deadlock and repeated million-event stall-detection cycles.
+- `HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS` is a consecutive-no-flow-completion budget, reset whenever any flow completes. This allows finite multi-stage callback chains to continue while still bounding a genuinely non-progressing recovery plateau.
+- Kept original sender pacing. A shortest-path bottleneck pacing trial was reverted after the Meta callback/tag-order regression failed.
+- Verification: Meta 64 MiB core remained exit 0 with 58881 FCT lines and JCT `54762.490 us`. HPN 256 MiB core-7 exited 0 with 58673 FCT lines, 12 EndToEnd lines, JCT `207327.981 us`, and 22352 total recovery rounds under a 32768 consecutive-no-completion budget.
 
 ## Ongoing Rule
 

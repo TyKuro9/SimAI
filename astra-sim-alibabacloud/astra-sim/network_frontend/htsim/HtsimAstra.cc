@@ -278,12 +278,32 @@ int main(int argc, char* argv[]) {
     }
   };
 
-  htsim_run(dump_astra_watchdog);
-
   auto rank0_reported = [&systems]() {
     return !systems.empty() && systems[0] != nullptr &&
         systems[0]->workload_reported;
   };
+  const bool final_drain_recovery =
+      env_enabled_or_default("HTSIM_FINAL_DRAIN_RECOVERY", true);
+  auto final_pass_finished = [&systems, final_drain_recovery]() {
+    return final_drain_recovery && !systems.empty() &&
+        systems[0] != nullptr && systems[0]->workload != nullptr &&
+        systems[0]->workload->pass_counter >=
+            systems[0]->workload->TOTAL_PASS;
+  };
+  bool final_drain_failed = false;
+  auto run_htsim_to_quiescence = [&]() {
+    if (htsim_run(dump_astra_watchdog, final_pass_finished)) {
+      size_t prepared_flows = htsim_prepare_final_recovery();
+      cout << "[htsim] Handing off " << prepared_flows
+           << " active flows from Go-Back-N to final recovery; draining "
+              "queued events" << endl;
+      htsim_run(dump_astra_watchdog);
+    }
+    return true;
+  };
+
+  run_htsim_to_quiescence();
+
   auto dump_unfinished_astra = [&systems](size_t rank_limit, size_t stream_limit) {
     size_t dumped = 0;
     for (auto* system : systems) {
@@ -309,14 +329,13 @@ int main(int argc, char* argv[]) {
   int scheduled_streams = 0;
   int started_streams = 0;
   int flushed_events = 0;
-  bool final_drain_failed = false;
-  const bool final_drain_recovery =
-      env_enabled_or_default("HTSIM_FINAL_DRAIN_RECOVERY", true);
   const size_t max_final_drain_recovery_rounds =
-      env_size_or_default("HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS", 32768);
+      env_size_or_default("HTSIM_FINAL_DRAIN_RECOVERY_ROUNDS", 65536);
   size_t final_drain_recovery_round = 0;
+  size_t recovery_rounds_without_flow_completion = 0;
+  uint64_t observed_completed_flows = htsim_completed_flow_count();
   size_t previous_recovered_flows = 0;
-  while (!rank0_reported()) {
+  while (!final_drain_failed && !rank0_reported()) {
     drained_streams = 0;
     scheduled_streams = 0;
     started_streams = 0;
@@ -329,7 +348,9 @@ int main(int argc, char* argv[]) {
     if (drained_streams > 0) {
       cout << "[htsim] Drained " << drained_streams
            << " finished streams after event queue became empty" << endl;
-      htsim_run(dump_astra_watchdog);
+      if (!run_htsim_to_quiescence()) {
+        break;
+      }
     }
     for (auto* system : systems) {
       if (system != nullptr) {
@@ -339,7 +360,9 @@ int main(int argc, char* argv[]) {
     if (scheduled_streams > 0) {
       cout << "[htsim] Scheduled " << scheduled_streams
            << " ready-list streams after event queue became empty" << endl;
-      htsim_run(dump_astra_watchdog);
+      if (!run_htsim_to_quiescence()) {
+        break;
+      }
     }
     for (auto* system : systems) {
       if (system != nullptr) {
@@ -349,7 +372,9 @@ int main(int argc, char* argv[]) {
     if (started_streams > 0) {
       cout << "[htsim] Started " << started_streams
            << " ready streams after event queue became empty" << endl;
-      htsim_run(dump_astra_watchdog);
+      if (!run_htsim_to_quiescence()) {
+        break;
+      }
     }
     for (auto* system : systems) {
       if (system != nullptr) {
@@ -360,27 +385,40 @@ int main(int argc, char* argv[]) {
       cout << "[htsim] Flushed " << flushed_events
            << " pending ASTRA event batches after event queue became empty"
            << endl;
-      htsim_run(dump_astra_watchdog);
+      if (!run_htsim_to_quiescence()) {
+        break;
+      }
     }
     if (rank0_reported()) {
       break;
     }
+    uint64_t completed_flows = htsim_completed_flow_count();
+    if (completed_flows > observed_completed_flows) {
+      recovery_rounds_without_flow_completion = 0;
+      observed_completed_flows = completed_flows;
+    }
     if (drained_streams == 0 && scheduled_streams == 0 &&
         started_streams == 0 && flushed_events == 0) {
       if (final_drain_recovery &&
-          final_drain_recovery_round < max_final_drain_recovery_rounds) {
+          recovery_rounds_without_flow_completion <
+              max_final_drain_recovery_rounds) {
         size_t recovered_flows = htsim_recover_stalled_flows();
         if (recovered_flows > 0) {
           final_drain_recovery_round++;
+          recovery_rounds_without_flow_completion++;
           if (final_drain_recovery_round == 1 ||
               final_drain_recovery_round % 256 == 0 ||
               recovered_flows != previous_recovered_flows) {
             cout << "[htsim] Final drain recovery round "
-                 << final_drain_recovery_round << " recovered_flows="
-                 << recovered_flows << endl;
+                 << final_drain_recovery_round
+                 << " no_completion_rounds="
+                 << recovery_rounds_without_flow_completion
+                 << " recovered_flows=" << recovered_flows << endl;
           }
           previous_recovered_flows = recovered_flows;
-          htsim_run(dump_astra_watchdog);
+          if (!run_htsim_to_quiescence()) {
+            break;
+          }
           continue;
         }
       }
