@@ -16,6 +16,11 @@ BaseStream::BaseStream(
   this->stream_num = stream_num;
   this->owner = owner;
   this->initialized = false;
+  this->phase_generation.store(0, std::memory_order_relaxed);
+#ifdef NS3_MTP
+  this->pending_receives.store(0, std::memory_order_relaxed);
+#endif
+  this->phase_callback_depth = 0;
   this->phases_to_go = phases_to_go;
   for (auto& vn : phases_to_go) {
     if (vn.algorithm != nullptr) {

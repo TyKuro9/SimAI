@@ -6,24 +6,69 @@ Workload（固定）：
 
 拓扑目录：`mytopo/`（256 规模文件在根目录，非子目录）
 
-## 用法
+---
+
+# 256 GPU × GPT-22B Dense — FlowSim
+
+Workload（固定）：
+
+`my_workloads/H100-gpt_22B-world_size256-tp8-pp8-ep1-gbs384-mbs1-seq2048-MOE-False-GEMM-False-flash_attn-False.txt`
+
+## 用法（Dense）
 
 ```bash
 cd /home/zty/Topo/SimAI_TyKuro9
 
 # 全部拓扑
-bash run_mixtral_256moe_flowsim.sh
+bash run_256dense_flowsim.sh
 
 # 指定拓扑（可多选）
-bash run_mixtral_256moe_flowsim.sh Meta HPN DeepSeek
-bash run_mixtral_256moe_flowsim.sh ROFT256
+bash run_256dense_flowsim.sh Meta HPN DeepSeek
+bash run_256dense_flowsim.sh ROFT256
 ```
 
 等价入口：
 
 ```bash
-bash experiments/flowsim_256/run_all.sh Meta
+bash experiments/flowsim_256/run_dense_all.sh Meta
 ```
+
+## 可选拓扑（Dense）
+
+| 参数名 | 拓扑文件 | 输出目录 |
+|--------|----------|----------|
+| Meta | Meta_Topo_256g_8gps_400Gbps_A100 | `flowsim_results/256/MetaDense/` |
+| HPN | AlibabaHPN_256g_8gps_DualToR_DualPlane_200Gbps_H100 | `HPNDense/` |
+| DeepSeek | DeepSeek_256g_8gps_p16a0.5_400Gbps_H800 | `DeepSeekDense/` |
+| Zcube | Zcube_n16_k2_256g_8gps_200Gbps_H100 | `ZcubeDense/` |
+| RO | RailOnly_256g_8gps_p16a0.5_400Gbps_H100 | `RODense/` |
+| ROFT | ROFT_256g_8gps_p16a0.5_400Gbps_H100 | `ROFTDense/` |
+
+FlowSim **不需要** `myconfig/*256.conf`（仅 NS3 使用）。
+
+---
+
+## 用法（MoE）
+
+```bash
+cd /home/zty/Topo/SimAI_TyKuro9
+
+# 全部拓扑
+bash run_256moe_flowsim.sh
+
+# 指定拓扑（可多选）
+bash run_256moe_flowsim.sh Meta HPN DeepSeek
+bash run_256moe_flowsim.sh ROFT256
+```
+
+等价入口：
+
+```bash
+bash experiments/flowsim_256/run_moe_all.sh Meta
+bash experiments/flowsim_256/run_meta_moe.sh   # 仅 MetaMoE
+```
+
+旧名 `run_mixtral_256moe_flowsim.sh` 仍可用（自动转发）。
 
 ## 可选拓扑
 
@@ -33,8 +78,8 @@ bash experiments/flowsim_256/run_all.sh Meta
 | HPN | AlibabaHPN_256g_8gps_DualToR_DualPlane_200Gbps_H100 | `HPNMoE/` |
 | DeepSeek | DeepSeek_256g_8gps_p16a0.5_400Gbps_H800 | `DeepSeekMoE/` |
 | Zcube | Zcube_n16_k2_256g_8gps_200Gbps_H100 | `ZcubeMoE/` |
-| RO | RailOnly_256g_8gps_p64a0.5_400Gbps_H100 | `ROMoE/` |
-| ROFT | ROFT_256g_8gps_p64a0.5_400Gbps_H100 | `ROFTMoE/` |
+| RO | RailOnly_256g_8gps_p16a0.5_400Gbps_H100 | `ROMoE/` |
+| ROFT | ROFT_256g_8gps_p16a0.5_400Gbps_H100 | `ROFTMoE/` |
 
 FlowSim **不需要** `myconfig/*256MoE.conf`（仅 NS3 使用）。
 
@@ -45,7 +90,8 @@ FlowSim **不需要** `myconfig/*256MoE.conf`（仅 NS3 使用）。
 | `FLOWSIM_THREADS` | `16` | `-t` 线程数 |
 | `FLOWSIM_BIN` | `m4/SimAI/bin/SimAI_flowsim` | 可执行文件路径 |
 
-## 输出
+## 输出（MoE）
 
-- 各拓扑：`experiments/flowsim_results/256/<Topo>MoE/fct.txt`
+- 各拓扑 CSV：`experiments/flowsim_results/256/<Topo>MoE/EndToEnd.csv`
+- 各拓扑 FCT：`experiments/flowsim_results/256/<Topo>MoE/fct.txt`
 - 日志：`experiments/flowsim_results/256/Update-256gpu_Mixtral8x7B-MoE_*_flowsim.log`

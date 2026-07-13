@@ -13,6 +13,7 @@
 - `scripts/fix_local_permissions.sh`
 - `astra-sim-alibabacloud/build.sh`
 - `astra-sim-alibabacloud/build/simai_htsim/build.sh`
+- `astra-sim-alibabacloud/build/simai_htsim/htsim_roce_spray.patch`
 - `run_256dense_flowsim.sh`
 - `run_256moe_flowsim.sh`
 - `run_mixtral_1024moe_flowsim.sh`
@@ -53,6 +54,7 @@
 - `astra-sim-alibabacloud`
 - `ns-3-alibabacloud`
 - `extern/network_backend/htsim` submodule pinned to `Broadcom/csg-htsim@841d9e7be46bb968eece766aa4b6c044c7799f67`.
+- Native htsim RoCE spray extensions are tracked as `astra-sim-alibabacloud/build/simai_htsim/htsim_roce_spray.patch`; `build/simai_htsim/build.sh` applies it to the submodule before compiling when needed.
 - external `/home/zty/Topo/m4/SimAI` for FlowSim.
 
 ## Modification Risk

@@ -11,6 +11,9 @@ SendPacketEventHandlerData::SendPacketEventHandlerData(
     int receiverNodeId,
     int tag)
     : BasicEventHandlerData(node, EventType::PacketSent) {
+  this->owner = nullptr;
+  this->phase_owner = nullptr;
+  this->phase_generation = 0;
   this->senderNodeId=senderNodeId;
   this->receiverNodeId = receiverNodeId;
   this->tag = tag;
@@ -25,6 +28,9 @@ SendPacketEventHandlerData::SendPacketEventHandlerData(
     EventType event)
     : BasicEventHandlerData(owner->owner, event) {
   this->owner = owner;
+  this->phase_owner = owner->my_current_phase.algorithm;
+  this->phase_generation =
+      owner->phase_generation.load(std::memory_order_acquire);
   this->senderNodeId = senderNodeId;
   this->receiverNodeId = receiverNodeId;
   this->tag = tag;

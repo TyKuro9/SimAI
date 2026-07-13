@@ -17,9 +17,9 @@ done
 |------|---------------------------|----------|
 | `Meta.conf` | `Meta_Topo_1024g_8gps_400Gbps_H100` | `simulation_output/meta1024/` |
 | `HPN.conf` | `AlibabaHPN_1024g_8gps_DualToR_DualPlane_200Gbps_H100` | `simulation_output/HPN1024/` |
-| `DeepSeek.conf` | `DeepSeek_1024g_8gps_p16a0.5_400Gbps_H100` | `simulation_output/DeepSeek1024/` |
-| `RO.conf` | `RailOnly_1024g_8gps_p64a0.5_400Gbps_H100` | `simulation_output/RO1024/` |
-| `ROFT.conf` | `ROFT_1024g_8gps_p64a0.5_400Gbps_H100` | `simulation_output/ROFT1024/` |
+| `DeepSeek.conf` | `DeepSeek_1024g_8gps_p32a0.5_400Gbps_H100` | `simulation_output/DeepSeek1024/` |
+| `RO.conf` | `RailOnly_1024g_8gps_p32a0.5_400Gbps_H100` | `simulation_output/RO1024/` |
+| `ROFT.conf` | `ROFT_1024g_8gps_p32a0.5_400Gbps_H100` | `simulation_output/ROFT1024/` |
 | `Zcube.conf` | `Zcube_n32_k2_1024g_8gps_200Gbps_H100` | `simulation_output/Zcube1024/` |
 
 ## ns-3 仿真示例（在仓库根目录）

@@ -9,12 +9,14 @@ LICENSE file in the root directory of this source tree.
 #include <assert.h>
 #include <math.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <fstream>
 #include <list>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <tuple>
 #include <vector>
@@ -48,6 +50,13 @@ class BaseStream : public Callable, public StreamStat {
   int priority;
   StreamState state;
   bool initialized;
+  std::atomic<uint64_t> phase_generation;
+#ifdef NS3_MTP
+  std::atomic<uint64_t> pending_receives;
+#endif
+  std::recursive_mutex phase_mutex;
+  int phase_callback_depth;
+  std::vector<Algorithm*> deferred_algorithm_deletes;
 
   Tick last_phase_change;
 

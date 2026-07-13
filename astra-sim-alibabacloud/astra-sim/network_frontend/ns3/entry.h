@@ -19,6 +19,7 @@
 #undef PGO_TRAINING
 #define PATH_TO_PGO_CONFIG "path_to_pgo_config"
 #define _QPS_PER_CONNECTION_  1
+#include <algorithm>
 #include "common.h"
 #include "ns3/applications-module.h"
 #include "ns3/core-module.h"
@@ -38,9 +39,13 @@
 #include <ns3/sim-setting.h>
 #include <ns3/switch-node.h>
 #include <time.h>
+#include <deque>
+#include <atomic>
+#include <set>
 #include <unordered_map>
 #include <mutex>
 #include <vector>
+#include "astra-sim/system/RecvPacketEventHadndlerData.hh"
 #ifdef NS3_MTP
 #include "ns3/mtp-interface.h"
 #endif
@@ -51,7 +56,15 @@ using namespace ns3;
 using namespace std;
 
 
-std::map<std::pair<std::pair<int, int>,int>, AstraSim::ncclFlowTag> receiver_pending_queue;
+using ReceiverPendingKey = std::pair<std::pair<int, int>, int>;
+struct ReceiverPendingArrival {
+  uint64_t remaining_count;
+  AstraSim::ncclFlowTag flow_tag;
+};
+using ReceiverPendingArrivals = std::deque<ReceiverPendingArrival>;
+std::map<ReceiverPendingKey, ReceiverPendingArrivals> receiver_pending_queue;
+using LogicalFlowNotificationKey = std::tuple<int, int, int, int>;
+std::set<LogicalFlowNotificationKey> receiver_notified_logical_flows;
 
 
 std::map<std::pair<int, std::pair<int, int>>, AstraSim::ncclFlowTag> sender_src_port_map; 
@@ -64,7 +77,21 @@ struct task1 {
   void (*msg_handler)(void *fun_arg);
   double schTime; 
 };
-map<std::pair<int, std::pair<int, int>>, struct task1> expeRecvHash;
+std::atomic<uint64_t> receiver_callbacks_dispatched{0};
+std::atomic<uint64_t> sender_callbacks_dispatched{0};
+
+void dispatch_receiver_callback(const task1& task) {
+  receiver_callbacks_dispatched.fetch_add(1, std::memory_order_relaxed);
+  task.msg_handler(task.fun_arg);
+}
+
+void dispatch_sender_callback(const task1& task) {
+  sender_callbacks_dispatched.fetch_add(1, std::memory_order_relaxed);
+  task.msg_handler(task.fun_arg);
+}
+using ExpectedReceiveKey = std::pair<int, std::pair<int, int>>;
+using ExpectedReceiveTasks = std::deque<task1>;
+map<ExpectedReceiveKey, ExpectedReceiveTasks> expeRecvHash;
 map<std::pair<int, std::pair<int, int>>, uint64_t> recvHash;
 map<std::pair<int, std::pair<int, int>>, struct task1> sentHash;
 map<std::pair<int, int>, int64_t> nodeHash;
@@ -72,6 +99,365 @@ map<std::pair<int,std::pair<int,int>>,int> waiting_to_sent_callback;
 map<std::pair<int,std::pair<int,int>>,int>waiting_to_notify_receiver;
 map<std::pair<int,std::pair<int,int>>,uint64_t>received_chunksize;  
 map<std::pair<int,std::pair<int,int>>,uint64_t>sent_chunksize;  
+
+void enqueue_expected_receive(
+    const ExpectedReceiveKey& key,
+    const task1& task) {
+  expeRecvHash[key].push_back(task);
+}
+
+bool front_expected_receive(
+    const ExpectedReceiveKey& key,
+    task1& task) {
+  auto expected = expeRecvHash.find(key);
+  if (expected == expeRecvHash.end() || expected->second.empty()) {
+    return false;
+  }
+  task = expected->second.front();
+  return true;
+}
+
+bool pop_expected_receive(
+    const ExpectedReceiveKey& key,
+    task1& task) {
+  auto expected = expeRecvHash.find(key);
+  if (expected == expeRecvHash.end() || expected->second.empty()) {
+    return false;
+  }
+  task = expected->second.front();
+  expected->second.pop_front();
+  if (expected->second.empty()) {
+    expeRecvHash.erase(expected);
+  }
+  return true;
+}
+
+size_t expected_receive_count() {
+  size_t count = 0;
+  for (const auto& expected : expeRecvHash) {
+    count += expected.second.size();
+  }
+  return count;
+}
+
+void dump_receive_mismatch(size_t limit) {
+  #ifdef NS3_MTP
+  MtpInterface::explicitCriticalSection cs;
+  #endif
+  size_t printed = 0;
+  size_t exact_key_overlap = 0;
+  for (const auto& arrival : recvHash) {
+    auto expected = expeRecvHash.find(arrival.first);
+    if (expected != expeRecvHash.end() && !expected->second.empty()) {
+      exact_key_overlap++;
+    }
+  }
+  size_t recv_items = 0;
+  for (const auto& arrival : recvHash) {
+    recv_items += arrival.second;
+  }
+  std::cerr << "[NS3 debug] pending counts recv_keys=" << recvHash.size()
+            << " expected_keys=" << expeRecvHash.size()
+            << " recv_items=" << recv_items
+            << " expected_items=" << expected_receive_count()
+            << " exact_key_overlap=" << exact_key_overlap << std::endl;
+  std::cerr << "[NS3 debug] pending arrivals" << std::endl;
+  for (const auto& arrival : recvHash) {
+    if (printed++ >= limit) {
+      break;
+    }
+    int tag = arrival.first.first;
+    int src = arrival.first.second.first;
+    int dst = arrival.first.second.second;
+    auto pending = receiver_pending_queue.find(
+        make_pair(make_pair(dst, src), tag));
+    std::cerr << "  arrival tag=" << tag
+              << " src=" << src
+              << " dst=" << dst
+              << " count=" << arrival.second;
+    if (pending != receiver_pending_queue.end() &&
+        !pending->second.empty()) {
+      const auto& flow_tag = pending->second.front().flow_tag;
+      std::cerr << " flow_id=" << flow_tag.current_flow_id
+                << " channel=" << flow_tag.channel_id
+                << " sender=" << flow_tag.sender_node
+                << " receiver=" << flow_tag.receiver_node;
+    }
+    std::cerr << std::endl;
+  }
+
+  printed = 0;
+  std::cerr << "[NS3 debug] expected receives" << std::endl;
+  for (const auto& expected : expeRecvHash) {
+    if (printed++ >= limit) {
+      break;
+    }
+    const auto& key = expected.first;
+    std::cerr << "  expected tag=" << key.first
+              << " src=" << key.second.first
+              << " dst=" << key.second.second
+              << " queued=" << expected.second.size();
+    if (!expected.second.empty()) {
+      auto* ehd = static_cast<AstraSim::RecvPacketEventHadndlerData*>(
+          expected.second.front().fun_arg);
+      if (ehd != nullptr) {
+        std::cerr << " flow_id=" << ehd->flowTag.current_flow_id
+                  << " expected_flow=" << ehd->flow_id
+                  << " expected_chunk=" << ehd->flowTag.chunk_id
+                  << " channel=" << ehd->flowTag.channel_id
+                  << " sender=" << ehd->flowTag.sender_node
+                  << " receiver=" << ehd->flowTag.receiver_node
+                  << " stream=" << ehd->stream_num
+                  << " phase_generation=" << ehd->phase_generation;
+        if (ehd->owner != nullptr) {
+          std::cerr << " owner_generation="
+                    << ehd->owner->phase_generation.load(
+                           std::memory_order_acquire)
+                    << " owner_state=" << static_cast<int>(ehd->owner->state)
+                    << " owner_queue=" << ehd->owner->current_queue_id
+                    << " owner_phase_owner="
+                    << ehd->owner->my_current_phase.algorithm
+                    << " task_phase_owner=" << ehd->phase_owner;
+        }
+      }
+    }
+    std::cerr << std::endl;
+  }
+  #ifdef NS3_MTP
+  cs.ExitSection();
+  #endif
+}
+
+void enqueue_receiver_pending_arrival(
+    int sender_node,
+    int receiver_node,
+    int tag,
+    uint64_t count,
+    const AstraSim::ncclFlowTag& flow_tag) {
+  if (count == 0) {
+    return;
+  }
+  auto recv_key = make_pair(tag, make_pair(sender_node, receiver_node));
+  auto pending_key =
+      make_pair(make_pair(receiver_node, sender_node), tag);
+  receiver_pending_queue[pending_key].push_back({count, flow_tag});
+  recvHash[recv_key] += count;
+}
+
+bool consume_receiver_pending_arrival(
+    int sender_node,
+    int receiver_node,
+    int tag,
+    uint64_t count,
+    AstraSim::ncclFlowTag& flow_tag) {
+  auto recv_key = make_pair(tag, make_pair(sender_node, receiver_node));
+  auto recv_it = recvHash.find(recv_key);
+  auto pending_key =
+      make_pair(make_pair(receiver_node, sender_node), tag);
+  auto pending = receiver_pending_queue.find(pending_key);
+  if (count == 0 || recv_it == recvHash.end() || recv_it->second < count ||
+      pending == receiver_pending_queue.end() || pending->second.empty()) {
+    return false;
+  }
+
+  uint64_t queued_count = 0;
+  for (const auto& arrival : pending->second) {
+    queued_count += arrival.remaining_count;
+    if (queued_count >= count) {
+      break;
+    }
+  }
+  if (queued_count < count) {
+    return false;
+  }
+
+  flow_tag = pending->second.front().flow_tag;
+  uint64_t remaining = count;
+  while (remaining > 0) {
+    ReceiverPendingArrival& arrival = pending->second.front();
+    uint64_t consumed = std::min(remaining, arrival.remaining_count);
+    arrival.remaining_count -= consumed;
+    remaining -= consumed;
+    if (arrival.remaining_count == 0) {
+      pending->second.pop_front();
+    }
+  }
+  if (pending->second.empty()) {
+    receiver_pending_queue.erase(pending);
+  }
+  recv_it->second -= count;
+  if (recv_it->second == 0) {
+    recvHash.erase(recv_it);
+  }
+  return true;
+}
+
+bool fallback_task_accepts_flow_tag(
+    const task1& task,
+    const AstraSim::ncclFlowTag& flowTag) {
+  auto* ehd =
+      static_cast<AstraSim::RecvPacketEventHadndlerData*>(task.fun_arg);
+  if (ehd == nullptr) {
+    return true;
+  }
+  const AstraSim::ncclFlowTag& expected = ehd->flowTag;
+  if (expected.receiver_node >= 0 &&
+      flowTag.receiver_node != expected.receiver_node) {
+    return false;
+  }
+  if (expected.channel_id >= 0 && flowTag.channel_id != expected.channel_id) {
+    return false;
+  }
+  if (expected.tree_flow_list.empty() || flowTag.tree_flow_list.empty()) {
+    return true;
+  }
+  for (int next_flow_id : flowTag.tree_flow_list) {
+    if (next_flow_id == -1) {
+      continue;
+    }
+    if (std::find(
+            expected.tree_flow_list.begin(),
+            expected.tree_flow_list.end(),
+            next_flow_id) == expected.tree_flow_list.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool find_unique_expected_recv_by_route(
+    int src,
+    int dst,
+    uint64_t count,
+    int reference_tag,
+    const AstraSim::ncclFlowTag& flowTag,
+    pair<int, pair<int, int>>& found_key,
+    task1& found_task) {
+  bool found = false;
+  long long best_diff = 0;
+  for (const auto& item : expeRecvHash) {
+    if (item.second.empty()) {
+      continue;
+    }
+    const task1& candidate_task = item.second.front();
+    if (item.first.second.first != src || item.first.second.second != dst ||
+        candidate_task.count != count ||
+        !fallback_task_accepts_flow_tag(candidate_task, flowTag)) {
+      continue;
+    }
+    long long diff = item.first.first > reference_tag
+        ? static_cast<long long>(item.first.first) - reference_tag
+        : static_cast<long long>(reference_tag) - item.first.first;
+    if (found && diff == best_diff) {
+      return false;
+    }
+    if (found && diff > best_diff) {
+      continue;
+    }
+    found = true;
+    best_diff = diff;
+    found_key = item.first;
+    found_task = candidate_task;
+  }
+  return found;
+}
+
+bool find_unique_arrived_recv_by_route(
+    int src,
+    int dst,
+    uint64_t count,
+    int reference_tag,
+    const task1& expected_task,
+    pair<int, pair<int, int>>& found_key) {
+  bool found = false;
+  long long best_diff = 0;
+  for (const auto& item : recvHash) {
+    if (item.first.second.first != src || item.first.second.second != dst ||
+        item.second != count) {
+      continue;
+    }
+    auto pending_it = receiver_pending_queue.find(
+        make_pair(make_pair(dst, src), item.first.first));
+    if (pending_it == receiver_pending_queue.end() ||
+        pending_it->second.empty() ||
+        !fallback_task_accepts_flow_tag(
+            expected_task, pending_it->second.front().flow_tag)) {
+      continue;
+    }
+    long long diff = item.first.first > reference_tag
+        ? static_cast<long long>(item.first.first) - reference_tag
+        : static_cast<long long>(reference_tag) - item.first.first;
+    if (found && diff == best_diff) {
+      return false;
+    }
+    if (found && diff > best_diff) {
+      continue;
+    }
+    found = true;
+    best_diff = diff;
+    found_key = item.first;
+  }
+  return found;
+}
+
+int reconcile_pending_receives() {
+  std::vector<task1> callbacks;
+  {
+    #ifdef NS3_MTP
+    MtpInterface::explicitCriticalSection cs;
+    #endif
+    for (const auto& arrival : recvHash) {
+      int tag = arrival.first.first;
+      int src = arrival.first.second.first;
+      int dst = arrival.first.second.second;
+      uint64_t count = arrival.second;
+      auto pending = receiver_pending_queue.find(
+          make_pair(make_pair(dst, src), tag));
+      if (pending == receiver_pending_queue.end() ||
+          pending->second.empty()) {
+        continue;
+      }
+
+      auto expected = expeRecvHash.find(arrival.first);
+      if (expected == expeRecvHash.end() || expected->second.empty()) {
+        continue;
+      }
+      pair<int, pair<int, int>> expected_key = arrival.first;
+      task1 expected_task = expected->second.front();
+      if (expected_task.count != count ||
+          !fallback_task_accepts_flow_tag(
+              expected_task, pending->second.front().flow_tag)) {
+        continue;
+      }
+
+      AstraSim::ncclFlowTag flow_tag;
+      if (!consume_receiver_pending_arrival(
+              src, dst, tag, count, flow_tag)) {
+        continue;
+      }
+      bool popped = pop_expected_receive(expected_key, expected_task);
+      assert(popped);
+      auto* ehd =
+          static_cast<AstraSim::RecvPacketEventHadndlerData*>(
+              expected_task.fun_arg);
+      if (ehd != nullptr && ehd->flowTag.current_flow_id == -1 &&
+          ehd->flowTag.child_flow_id == -1) {
+        ehd->flowTag = flow_tag;
+      }
+      callbacks.push_back(expected_task);
+      break;
+    }
+    #ifdef NS3_MTP
+    cs.ExitSection();
+    #endif
+  }
+
+  for (const task1& task : callbacks) {
+    dispatch_receiver_callback(task);
+  }
+  return callbacks.size();
+}
+
 bool is_sending_finished(int src,int dst,AstraSim::ncclFlowTag flowTag){
   int tag_id = flowTag.current_flow_id;
   if (waiting_to_sent_callback.count(
@@ -147,6 +533,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
       global_t == 1 ? maxRtt : pairRtt[src][dst], msg_handler, fun_arg, tag,
       src, dst);
   if(nvls_on) clientHelper.SetAttribute("NVLS_enable", UintegerValue (1));
+  int pending_receiver_callbacks = 0;
   {
     #ifdef NS3_MTP
     MtpInterface::explicitCriticalSection cs;
@@ -155,11 +542,13 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
     appCon.Start(Time(send_lat));
     waiting_to_sent_callback[std::make_pair(request->flowTag.current_flow_id,std::make_pair(src,dst))]++;
     waiting_to_notify_receiver[std::make_pair(request->flowTag.current_flow_id,std::make_pair(src,dst))]++;
+    pending_receiver_callbacks = waiting_to_notify_receiver[std::make_pair(
+        request->flowTag.current_flow_id, std::make_pair(src, dst))];
     #ifdef NS3_MTP
     cs.ExitSection();
     #endif
   }
-  NcclLog->writeLog(NcclLogLevel::DEBUG,"waiting_to_notify_receiver  current_flow_id  %d src  %d dst  %d count  %d",request->flowTag.current_flow_id,src,dst,waiting_to_notify_receiver[std::make_pair(request->flowTag.tag_id,std::make_pair(src,dst))]);
+  NcclLog->writeLog(NcclLogLevel::DEBUG,"waiting_to_notify_receiver  current_flow_id  %d src  %d dst  %d count  %d",request->flowTag.current_flow_id,src,dst,pending_receiver_callbacks);
   }
 }
 
@@ -171,50 +560,67 @@ void notify_receiver_receive_data(int sender_node, int receiver_node,
     #endif                         
     MockNcclLog* NcclLog = MockNcclLog::getInstance();
     NcclLog->writeLog(NcclLogLevel::DEBUG," %d notify recevier:  %d message size:  %llu",sender_node,receiver_node,message_size);
-    int tag = flowTag.tag_id;   
-    if (expeRecvHash.find(make_pair(
-            tag, make_pair(sender_node, receiver_node))) != expeRecvHash.end()) {
+    int tag = flowTag.tag_id;
+    auto logical_flow_key = std::make_tuple(
+        tag, flowTag.current_flow_id, sender_node, receiver_node);
+    if (flowTag.current_flow_id >= 0 &&
+        !receiver_notified_logical_flows.insert(logical_flow_key).second) {
+      NcclLog->writeLog(
+          NcclLogLevel::WARNING,
+          "duplicate receiver notification dropped: tag %d flow_id %d src %d dst %d size %llu",
+          tag,
+          flowTag.current_flow_id,
+          sender_node,
+          receiver_node,
+          message_size);
+      #ifdef NS3_MTP
+      cs.ExitSection();
+      #endif
+      return;
+    }
+    auto exact_key = make_pair(tag, make_pair(sender_node, receiver_node));
+    auto exact_expected = expeRecvHash.find(exact_key);
+    if (exact_expected != expeRecvHash.end() &&
+        !exact_expected->second.empty()) {
       task1 t2 =
-          expeRecvHash[make_pair(tag, make_pair(sender_node, receiver_node))];
+          exact_expected->second.front();
     MockNcclLog* NcclLog = MockNcclLog::getInstance();
     NcclLog->writeLog(NcclLogLevel::DEBUG," %d notify recevier:  %d message size:  %llu t2.count:  %llu channle id:  %d",sender_node,receiver_node,message_size,t2.count,flowTag.channel_id);
       AstraSim::RecvPacketEventHadndlerData* ehd = (AstraSim::RecvPacketEventHadndlerData*) t2.fun_arg;
       if (message_size == t2.count) {
         NcclLog->writeLog(NcclLogLevel::DEBUG," message_size = t2.count expeRecvHash.erase  %d notify recevier:  %d message size:  %llu channel_id  %d",sender_node,receiver_node,message_size,tag);
-        expeRecvHash.erase(make_pair(tag, make_pair(sender_node, receiver_node)));
+        bool popped = pop_expected_receive(exact_key, t2);
+        assert(popped);
         #ifdef NS3_MTP
         cs.ExitSection();
         #endif
         assert(ehd->flowTag.current_flow_id == -1 && ehd->flowTag.child_flow_id == -1);
         ehd->flowTag = flowTag;
-        t2.msg_handler(t2.fun_arg);
+        dispatch_receiver_callback(t2);
         goto receiver_end_1st_section;
       } else if (message_size > t2.count) {
-        recvHash[make_pair(tag, make_pair(sender_node, receiver_node))] =
-            message_size - t2.count;
+        enqueue_receiver_pending_arrival(
+            sender_node,
+            receiver_node,
+            tag,
+            message_size - t2.count,
+            flowTag);
         NcclLog->writeLog(NcclLogLevel::DEBUG,"message_size > t2.count expeRecvHash.erase %d notify recevier:  %d message size:  %llu channel_id  %d",sender_node,receiver_node,message_size,tag);
-        expeRecvHash.erase(make_pair(tag, make_pair(sender_node, receiver_node)));
+        bool popped = pop_expected_receive(exact_key, t2);
+        assert(popped);
         #ifdef NS3_MTP
         cs.ExitSection();
         #endif
         assert(ehd->flowTag.current_flow_id == -1 && ehd->flowTag.child_flow_id == -1);
         ehd->flowTag = flowTag;
-        t2.msg_handler(t2.fun_arg);
+        dispatch_receiver_callback(t2);
         goto receiver_end_1st_section;
       } else {
-        t2.count -= message_size;
-        expeRecvHash[make_pair(tag, make_pair(sender_node, receiver_node))] = t2;
+        exact_expected->second.front().count -= message_size;
       }
     } else {
-      receiver_pending_queue[std::make_pair(std::make_pair(receiver_node, sender_node),tag)] = flowTag;
-      if (recvHash.find(make_pair(tag, make_pair(sender_node, receiver_node))) ==
-          recvHash.end()) {
-        recvHash[make_pair(tag, make_pair(sender_node, receiver_node))] =
-            message_size;
-      } else {
-        recvHash[make_pair(tag, make_pair(sender_node, receiver_node))] +=
-            message_size;
-      }
+      enqueue_receiver_pending_arrival(
+          sender_node, receiver_node, tag, message_size, flowTag);
     }
     #ifdef NS3_MTP
     cs.ExitSection();
@@ -259,7 +665,7 @@ void notify_sender_sending_finished(int sender_node, int receiver_node,
         #ifdef NS3_MTP
         cs.ExitSection();
         #endif
-        t2.msg_handler(t2.fun_arg);
+        dispatch_sender_callback(t2);
         goto sender_end_1st_section;
       }else{
         NcclLog->writeLog(NcclLogLevel::ERROR,"sentHash msg size != sender_node %d receiver_node %d message_size %lu flow_id ",sender_node,receiver_node,message_size);
@@ -291,7 +697,7 @@ void notify_sender_packet_arrivered_receiver(int sender_node, int receiver_node,
       } else {
         nodeHash[make_pair(sender_node, 0)] += message_size;
       }
-      t2.msg_handler(t2.fun_arg);
+      dispatch_sender_callback(t2);
     }
   }
 }
@@ -305,10 +711,16 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
           (CustomHeader::GetStaticWholeHeaderSize() -
            IntHeader::GetStaticSize()); 
   uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b;
-  fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu\n", q->sip.Get(), q->dip.Get(),
-          q->sport, q->dport, q->m_size, q->startTime.GetTimeStep(),
-          (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct);
-  fflush(fout);
+  static const bool fct_output_enabled = [] {
+    const char* value = std::getenv("AS_FCT_OUTPUT");
+    return value == nullptr || value[0] != '0';
+  }();
+  if (fct_output_enabled) {
+    fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu\n", q->sip.Get(), q->dip.Get(),
+            q->sport, q->dport, q->m_size, q->startTime.GetTimeStep(),
+            (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct);
+    fflush(fout);
+  }
 
   AstraSim::ncclFlowTag flowTag;
   uint64_t notify_size;
@@ -341,6 +753,17 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     cs.ExitSection();
     #endif
   }
+  if (flowTag.flow_size > 0 && notify_size > flowTag.flow_size) {
+    MockNcclLog::getInstance()->writeLog(
+        NcclLogLevel::WARNING,
+        "receiver notification size clamped: flow_id %d src %d dst %d aggregated %llu logical %llu",
+        flowTag.current_flow_id,
+        sid,
+        did,
+        notify_size,
+        flowTag.flow_size);
+    notify_size = flowTag.flow_size;
+  }
   notify_receiver_receive_data(sid, did, notify_size, flowTag);
 }
 
@@ -367,6 +790,17 @@ void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     #ifdef NS3_MTP
     cs.ExitSection();
     #endif
+  }
+  if (flowTag.flow_size > 0 && all_sent_chunksize > flowTag.flow_size) {
+    MockNcclLog::getInstance()->writeLog(
+        NcclLogLevel::WARNING,
+        "sender notification size clamped: flow_id %d src %d dst %d aggregated %llu logical %llu",
+        flowTag.current_flow_id,
+        sid,
+        did,
+        all_sent_chunksize,
+        flowTag.flow_size);
+    all_sent_chunksize = flowTag.flow_size;
   }
   notify_sender_sending_finished(sid, did, all_sent_chunksize, flowTag);
 }

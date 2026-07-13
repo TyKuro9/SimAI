@@ -10,3 +10,6 @@
 	path = ns-3-alibabacloud
 	url = git@github.com:TyKuro9/ns-3-alibabacloud.git
 	branch = master
+[submodule "extern/network_backend/htsim"]
+	path = extern/network_backend/htsim
+	url = https://github.com/Broadcom/csg-htsim.git

@@ -19,6 +19,7 @@
 #undef PGO_TRAINING
 #define PATH_TO_PGO_CONFIG "path_to_pgo_config"
 
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <time.h>
@@ -154,6 +155,13 @@ void get_pfc(FILE *fout, Ptr<QbbNetDevice> dev, uint32_t type) {
   fprintf(fout, "%lu %u %u %u %u\n", Simulator::Now().GetTimeStep(),
           dev->GetNode()->GetId(), dev->GetNode()->GetNodeType(),
           dev->GetIfIndex(), type);
+  static const bool flush_pfc = [] {
+    const char* value = std::getenv("AS_NS3_PFC_FLUSH");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  if (flush_pfc) {
+    fflush(fout);
+  }
 }
 
 struct QlenDistribution {

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# 创建 256-half Dense FlowSim 输出子目录
+set -euo pipefail
+
+BASE="/home/zty/Topo/SimAI_TyKuro9/experiments/flowsim_results/256-half"
+for d in MetaDense HPNDense DeepSeekDense ZcubeDense RODense ROFTDense; do
+  mkdir -p "${BASE}/${d}"
+done
