@@ -308,6 +308,13 @@ bool fallback_task_accepts_flow_tag(
   if (expected.channel_id >= 0 && flowTag.channel_id != expected.channel_id) {
     return false;
   }
+  if (ehd->flow_id >= 0 && !flowTag.tree_flow_list.empty() &&
+      std::find(
+          flowTag.tree_flow_list.begin(),
+          flowTag.tree_flow_list.end(),
+          ehd->flow_id) == flowTag.tree_flow_list.end()) {
+    return false;
+  }
   if (expected.tree_flow_list.empty() || flowTag.tree_flow_list.empty()) {
     return true;
   }
@@ -418,12 +425,24 @@ int reconcile_pending_receives() {
         continue;
       }
 
+      pair<int, pair<int, int>> expected_key = arrival.first;
+      task1 expected_task;
+      bool matched_by_route = false;
       auto expected = expeRecvHash.find(arrival.first);
-      if (expected == expeRecvHash.end() || expected->second.empty()) {
+      if (expected != expeRecvHash.end() && !expected->second.empty()) {
+        expected_task = expected->second.front();
+      } else if (find_unique_expected_recv_by_route(
+                     src,
+                     dst,
+                     count,
+                     tag,
+                     pending->second.front().flow_tag,
+                     expected_key,
+                     expected_task)) {
+        matched_by_route = true;
+      } else {
         continue;
       }
-      pair<int, pair<int, int>> expected_key = arrival.first;
-      task1 expected_task = expected->second.front();
       if (expected_task.count != count ||
           !fallback_task_accepts_flow_tag(
               expected_task, pending->second.front().flow_tag)) {
@@ -443,6 +462,17 @@ int reconcile_pending_receives() {
       if (ehd != nullptr && ehd->flowTag.current_flow_id == -1 &&
           ehd->flowTag.child_flow_id == -1) {
         ehd->flowTag = flow_tag;
+      }
+      if (matched_by_route) {
+        std::cerr << "[NS3] Reconciled receive by unique route: arrival_tag "
+                  << tag << ", expected_tag " << expected_key.first
+                  << ", src " << src << ", dst " << dst
+                  << ", count " << count
+                  << ", arrival_flow " << flow_tag.current_flow_id;
+        if (ehd != nullptr) {
+          std::cerr << ", expected_flow " << ehd->flow_id;
+        }
+        std::cerr << std::endl;
       }
       callbacks.push_back(expected_task);
       break;
