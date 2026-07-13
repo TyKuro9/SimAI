@@ -154,6 +154,7 @@ void get_pfc(FILE *fout, Ptr<QbbNetDevice> dev, uint32_t type) {
   fprintf(fout, "%lu %u %u %u %u\n", Simulator::Now().GetTimeStep(),
           dev->GetNode()->GetId(), dev->GetNode()->GetNodeType(),
           dev->GetIfIndex(), type);
+  fflush(fout);
 }
 
 struct QlenDistribution {
@@ -178,7 +179,9 @@ void monitor_qlen(FILE* qlen_output, NodeContainer *n){
 			sw->PrintSwitchQlen(qlen_output);
 		}
 	}
-	Simulator::Schedule(MicroSeconds(qlen_mon_interval), &monitor_qlen, qlen_output, n);
+	if (Simulator::Now() + MicroSeconds(qlen_mon_interval) <= MicroSeconds(mon_end)) {
+		Simulator::Schedule(MicroSeconds(qlen_mon_interval), &monitor_qlen, qlen_output, n);
+	}
 }
 void monitor_bw(FILE* bw_output, NodeContainer *n){
 	for (uint32_t i = 0; i < n->GetN(); i++){
@@ -193,7 +196,9 @@ void monitor_bw(FILE* bw_output, NodeContainer *n){
 			host->GetObject<RdmaDriver>()->m_rdma->PrintHostBW(bw_output, bw_mon_interval);
 		}
 	}
-	Simulator::Schedule(MicroSeconds(bw_mon_interval), &monitor_bw, bw_output, n);
+	if (Simulator::Now() + MicroSeconds(bw_mon_interval) <= MicroSeconds(mon_end)) {
+		Simulator::Schedule(MicroSeconds(bw_mon_interval), &monitor_bw, bw_output, n);
+	}
 }
 void monitor_qp_rate(FILE* rate_output, NodeContainer *n){
 	for(uint32_t i = 0; i < n->GetN(); i++){
@@ -202,7 +207,9 @@ void monitor_qp_rate(FILE* rate_output, NodeContainer *n){
 			host->GetObject<RdmaDriver>()->m_rdma->PrintQPRate(rate_output);
 		}
 	}
-	Simulator::Schedule(MicroSeconds(qp_mon_interval), &monitor_qp_rate, rate_output, n);
+	if (Simulator::Now() + MicroSeconds(qp_mon_interval) <= MicroSeconds(mon_end)) {
+		Simulator::Schedule(MicroSeconds(qp_mon_interval), &monitor_qp_rate, rate_output, n);
+	}
 }
 void monitor_qp_cnp_number(FILE* cnp_output, NodeContainer *n){
 	for(uint32_t i = 0; i < n->GetN(); i++){
@@ -211,32 +218,42 @@ void monitor_qp_cnp_number(FILE* cnp_output, NodeContainer *n){
 			host->GetObject<RdmaDriver>()->m_rdma->PrintQPCnpNumber(cnp_output);
 		}
 	}
-	Simulator::Schedule(MicroSeconds(qp_mon_interval), &monitor_qp_cnp_number, cnp_output, n);
+	if (Simulator::Now() + MicroSeconds(qp_mon_interval) <= MicroSeconds(mon_end)) {
+		Simulator::Schedule(MicroSeconds(qp_mon_interval), &monitor_qp_cnp_number, cnp_output, n);
+	}
 }
 void schedule_monitor(){
-	FILE* qlen_output = fopen(qlen_mon_file.c_str(), "w"); 
-	assert(qlen_output != nullptr);
-	fprintf(qlen_output, "%s, %s, %s, %s, %s, %s\n", "time", "sw_id", "port_id", "q_id", "q_len", "port_len");
-	fflush(qlen_output);
-	Simulator::Schedule(MicroSeconds(mon_start), &monitor_qlen, qlen_output, &n);
+	if (!qlen_mon_file.empty()) {
+		FILE* qlen_output = fopen(qlen_mon_file.c_str(), "w"); 
+		assert(qlen_output != nullptr);
+		fprintf(qlen_output, "%s, %s, %s, %s, %s, %s\n", "time", "sw_id", "port_id", "q_id", "q_len", "port_len");
+		fflush(qlen_output);
+		Simulator::Schedule(MicroSeconds(mon_start), &monitor_qlen, qlen_output, &n);
+	}
 
-	FILE* bw_output = fopen(bw_mon_file.c_str(), "w");
-	assert(bw_output != nullptr);
-	fprintf(bw_output, "%s, %s, %s, %s\n", "time", "node_id", "port_id", "bandwidth");
-	fflush(bw_output);
-	Simulator::Schedule(MicroSeconds(mon_start), &monitor_bw, bw_output, &n);
+	if (!bw_mon_file.empty()) {
+		FILE* bw_output = fopen(bw_mon_file.c_str(), "w");
+		assert(bw_output != nullptr);
+		fprintf(bw_output, "%s, %s, %s, %s\n", "time", "node_id", "port_id", "bandwidth");
+		fflush(bw_output);
+		Simulator::Schedule(MicroSeconds(mon_start), &monitor_bw, bw_output, &n);
+	}
 
-	FILE* rate_output = fopen(rate_mon_file.c_str(), "w");
-	assert(rate_output != nullptr);
-	fprintf(rate_output, "%s, %s, %s, %s, %s, %s, %s\n", "time", "src", "dst", "sport", "dport", "size", "curr_rate");
-	fflush(rate_output);
-	Simulator::Schedule(MicroSeconds(mon_start), &monitor_qp_rate, rate_output, &n);
+	if (!rate_mon_file.empty()) {
+		FILE* rate_output = fopen(rate_mon_file.c_str(), "w");
+		assert(rate_output != nullptr);
+		fprintf(rate_output, "%s, %s, %s, %s, %s, %s, %s\n", "time", "src", "dst", "sport", "dport", "size", "curr_rate");
+		fflush(rate_output);
+		Simulator::Schedule(MicroSeconds(mon_start), &monitor_qp_rate, rate_output, &n);
+	}
 
-	FILE* cnp_output = fopen(cnp_mon_file.c_str(), "w");
-	assert(cnp_output != nullptr);
-	fprintf(cnp_output, "%s, %s, %s, %s, %s, %s, %s\n", "time", "src", "dst", "sport", "dport", "size", "cnp_number");
-	fflush(cnp_output);
-	Simulator::Schedule(MicroSeconds(mon_start), &monitor_qp_cnp_number, cnp_output, &n);
+	if (!cnp_mon_file.empty()) {
+		FILE* cnp_output = fopen(cnp_mon_file.c_str(), "w");
+		assert(cnp_output != nullptr);
+		fprintf(cnp_output, "%s, %s, %s, %s, %s, %s, %s\n", "time", "src", "dst", "sport", "dport", "size", "cnp_number");
+		fflush(cnp_output);
+		Simulator::Schedule(MicroSeconds(mon_start), &monitor_qp_cnp_number, cnp_output, &n);
+	}
 }
 
 void CalculateRoute(Ptr<Node> host) {
@@ -444,6 +461,9 @@ void TakeDownLink(NodeContainer n, Ptr<Node> a, Ptr<Node> b) {
 }
 
 string get_output_file_name(string config_file, string output_file){
+	if (!output_file.empty() && output_file[0] == '/') {
+		return output_file;
+	}
 	auto idx = config_file.find_last_of('/');
 	string ans = output_file.substr(0, output_file.length()-4) + config_file.substr(idx+7);
 	return ans;
@@ -564,7 +584,6 @@ bool ReadConf(string network_topo,string network_conf) {
         conf >> has_win;
       } else if (key.compare("GLOBAL_T") == 0) {
         conf >> global_t;
-        global_t = 1;
       } else if (key.compare("MI_THRESH") == 0) {
         conf >> mi_thresh;
       } else if (key.compare("VAR_WIN") == 0) {

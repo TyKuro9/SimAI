@@ -1,0 +1,57 @@
+{
+  "description": "1024-GPU H100 topology set with a 12.8Tbps ordinary-switch target; Meta PSWs may use 25.6Tbps.",
+  "notes": {
+    "DeepSeek": "port=32 keeps ASW at 32 x 400Gbps; PSWs are below the limit by design.",
+    "HPN": "Existing DualToR-DualPlane generator with switch_throughput=12800Gbps.",
+    "Meta": "Full 64 ASW x 16 PSW, each ASW has 16 PSW uplinks plus 16 GPU ports; each PSW is 25.6Tbps.",
+    "RO": "Rail-only full mesh across five uneven host segments [28,25,25,25,25].",
+    "ROFT": "Rail GPU mapping plus full 64 ASW x 16 PSW connectivity; PSWs are 25.6Tbps.",
+    "Zcube": "Existing n=32,k=2 topology already uses 64 x 200Gbps ports per switch."
+  },
+  "nvswitch_excluded_from_limit": true,
+  "switch_limit_gbps": 12800.0,
+  "topologies": {
+    "DeepSeek": {
+      "max_gbps": 12800.0,
+      "mean_gbps": 6400.0,
+      "mean_utilization": 0.5,
+      "over_limit_count": 0,
+      "path": "mytopo/1024_12p8T/DeepSeek_1024g_8gps_p32a0.5_400Gbps_H100"
+    },
+    "HPN": {
+      "max_gbps": 12800.0,
+      "mean_gbps": 12800.0,
+      "mean_utilization": 1.0,
+      "over_limit_count": 0,
+      "path": "mytopo/1024_12p8T/AlibabaHPN_1024g_8gps_DualToR_DualPlane_200Gbps_H100"
+    },
+    "Meta": {
+      "max_gbps": 25600.0,
+      "mean_gbps": 15360.0,
+      "mean_utilization": 1.2,
+      "over_limit_count": 16,
+      "path": "mytopo/1024_12p8T/Meta_Topo_1024g_8gps_400Gbps_H100_12p8T"
+    },
+    "RO": {
+      "max_gbps": 12800.0,
+      "mean_gbps": 11840.0,
+      "mean_utilization": 0.925,
+      "over_limit_count": 0,
+      "path": "mytopo/1024_12p8T/RailOnly_1024g_8gps_s5_400Gbps_H100_12p8T"
+    },
+    "ROFT": {
+      "max_gbps": 25600.0,
+      "mean_gbps": 15360.0,
+      "mean_utilization": 1.2,
+      "over_limit_count": 16,
+      "path": "mytopo/1024_12p8T/ROFT_1024g_8gps_p32a0.5_400Gbps_H100_12p8T"
+    },
+    "Zcube": {
+      "max_gbps": 12800.0,
+      "mean_gbps": 12800.0,
+      "mean_utilization": 1.0,
+      "over_limit_count": 0,
+      "path": "mytopo/1024_12p8T/Zcube_n32_k2_1024g_8gps_200Gbps_H100"
+    }
+  }
+}

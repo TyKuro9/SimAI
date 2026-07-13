@@ -41,6 +41,11 @@
 #include <unordered_map>
 #include <mutex>
 #include <vector>
+#include <cstdlib>
+#include <cstring>
+#include <algorithm>
+#include <cctype>
+#include <string>
 #ifdef NS3_MTP
 #include "ns3/mtp-interface.h"
 #endif
@@ -72,6 +77,305 @@ map<std::pair<int,std::pair<int,int>>,int> waiting_to_sent_callback;
 map<std::pair<int,std::pair<int,int>>,int>waiting_to_notify_receiver;
 map<std::pair<int,std::pair<int,int>>,uint64_t>received_chunksize;  
 map<std::pair<int,std::pair<int,int>>,uint64_t>sent_chunksize;  
+
+enum class PxnLegKind {
+  None,
+  Local,
+  Remote,
+};
+
+enum class PxnPolicy {
+  Off,
+  Force,
+  Fallback,
+  Aggregate,
+};
+
+struct PxnLegContext {
+  PxnLegKind kind;
+  int original_src;
+  int original_dst;
+  int tag;
+  uint64_t count;
+  void *fun_arg;
+  void (*msg_handler)(void *fun_arg);
+  AstraSim::sim_request request;
+  std::vector<std::pair<int, int>> legs;
+  size_t next_leg_index;
+};
+
+map<std::pair<int, std::pair<int, int>>, PxnLegContext> pxn_leg_context;
+uint64_t ns3_pxn_split_count = 0;
+uint64_t ns3_pxn_direct_cross_rail_count = 0;
+
+struct PxnLogFields {
+  int original_src;
+  int original_dst;
+  const char* leg_kind;
+  size_t leg_index;
+  size_t leg_count;
+  int flow_id;
+};
+
+struct Ns3PxnPlan {
+  bool use_pxn = false;
+  std::vector<std::pair<int, int>> legs;
+};
+
+std::string ns3_normalize_env_value(const char* value) {
+  std::string normalized = value ? value : "";
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return normalized;
+}
+
+const char* pxn_leg_kind_name(PxnLegKind kind) {
+  switch (kind) {
+    case PxnLegKind::None:
+      return "none";
+    case PxnLegKind::Local:
+      return "local";
+    case PxnLegKind::Remote:
+      return "remote";
+  }
+  return "unknown";
+}
+
+PxnLogFields build_pxn_log_fields(
+    int physical_src,
+    int physical_dst,
+    const AstraSim::ncclFlowTag& flowTag,
+    bool has_pxn_ctx,
+    const PxnLegContext& pxn_ctx) {
+  PxnLogFields fields;
+  fields.original_src = physical_src;
+  fields.original_dst = physical_dst;
+  fields.leg_kind = pxn_leg_kind_name(PxnLegKind::None);
+  fields.leg_index = 0;
+  fields.leg_count = 1;
+  fields.flow_id = flowTag.current_flow_id;
+  if (has_pxn_ctx) {
+    fields.original_src = pxn_ctx.original_src;
+    fields.original_dst = pxn_ctx.original_dst;
+    fields.leg_kind = pxn_leg_kind_name(pxn_ctx.kind);
+    fields.leg_count = pxn_ctx.legs.empty() ? 1 : pxn_ctx.legs.size();
+    fields.leg_index = pxn_ctx.next_leg_index > 0 ? pxn_ctx.next_leg_index - 1 : 0;
+    if (fields.leg_index >= fields.leg_count) {
+      fields.leg_index = fields.leg_count - 1;
+    }
+  }
+  return fields;
+}
+
+PxnPolicy ns3_pxn_policy() {
+  static PxnPolicy policy = []() {
+    std::string policy_env = ns3_normalize_env_value(std::getenv("AS_PXN_POLICY"));
+    if (!policy_env.empty()) {
+      if (policy_env == "off" || policy_env == "0" ||
+          policy_env == "disable" || policy_env == "disabled" ||
+          policy_env == "none") {
+        return PxnPolicy::Off;
+      }
+      if (policy_env == "force" || policy_env == "on" ||
+          policy_env == "1" || policy_env == "enable" ||
+          policy_env == "enabled") {
+        return PxnPolicy::Force;
+      }
+      if (policy_env == "fallback") {
+        return PxnPolicy::Fallback;
+      }
+      if (policy_env == "aggregate") {
+        return PxnPolicy::Aggregate;
+      }
+      MockNcclLog::getInstance()->writeLog(
+          NcclLogLevel::ERROR,
+          "Unknown AS_PXN_POLICY=%s, expected off/force/fallback/aggregate",
+          policy_env.c_str());
+      exit(-1);
+    }
+
+    const char* enable_env = std::getenv("AS_PXN_ENABLE");
+    if (enable_env && std::strcmp(enable_env, "1") == 0) {
+      return PxnPolicy::Force;
+    }
+    return PxnPolicy::Off;
+  }();
+  return policy;
+}
+
+const char* ns3_pxn_policy_name(PxnPolicy policy) {
+  switch (policy) {
+    case PxnPolicy::Off:
+      return "off";
+    case PxnPolicy::Force:
+      return "force";
+    case PxnPolicy::Fallback:
+      return "fallback";
+    case PxnPolicy::Aggregate:
+      return "aggregate";
+  }
+  return "unknown";
+}
+
+bool ns3_needs_pxn(int src, int dst) {
+  return gpus_per_server > 0 &&
+         src / static_cast<int>(gpus_per_server) != dst / static_cast<int>(gpus_per_server) &&
+         src % static_cast<int>(gpus_per_server) != dst % static_cast<int>(gpus_per_server);
+}
+
+bool ns3_has_direct_route(int src, int dst) {
+  if (src == dst) {
+    return true;
+  }
+
+  auto src_bw_it = pairBw.find(src);
+  if (src_bw_it != pairBw.end()) {
+    auto dst_bw_it = src_bw_it->second.find(dst);
+    if (dst_bw_it != src_bw_it->second.end() && dst_bw_it->second > 0) {
+      return true;
+    }
+  }
+
+  if (src >= 0 && dst >= 0 && src < static_cast<int>(n.GetN()) &&
+      dst < static_cast<int>(n.GetN())) {
+    auto src_nh_it = nextHop.find(n.Get(src));
+    if (src_nh_it != nextHop.end()) {
+      auto dst_nh_it = src_nh_it->second.find(n.Get(dst));
+      if (dst_nh_it != src_nh_it->second.end() && !dst_nh_it->second.empty()) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+bool ns3_should_use_pxn(int src, int dst) {
+  if (!ns3_needs_pxn(src, dst)) {
+    return false;
+  }
+
+  switch (ns3_pxn_policy()) {
+    case PxnPolicy::Off:
+      return false;
+    case PxnPolicy::Force:
+    case PxnPolicy::Aggregate:
+      return true;
+    case PxnPolicy::Fallback:
+      return !ns3_has_direct_route(src, dst);
+  }
+  return false;
+}
+
+std::vector<int> ns3_local_gpu_candidates(int gpu) {
+  std::vector<int> candidates;
+  int gpus = static_cast<int>(gpus_per_server);
+  if (gpus <= 0) {
+    candidates.push_back(gpu);
+    return candidates;
+  }
+
+  int gpu_count = static_cast<int>(node_num - nvswitch_num - switch_num);
+  int base = (gpu / gpus) * gpus;
+  candidates.push_back(gpu);
+  for (int offset = 0; offset < gpus; ++offset) {
+    int candidate = base + offset;
+    if (candidate != gpu && candidate >= 0 && candidate < gpu_count) {
+      candidates.push_back(candidate);
+    }
+  }
+  return candidates;
+}
+
+Ns3PxnPlan ns3_make_plan_from_proxies(
+    int src,
+    int dst,
+    int src_proxy,
+    int dst_proxy) {
+  Ns3PxnPlan plan;
+
+  if (!ns3_has_direct_route(src, src_proxy) ||
+      !ns3_has_direct_route(src_proxy, dst_proxy) ||
+      !ns3_has_direct_route(dst_proxy, dst)) {
+    return plan;
+  }
+
+  if (src != src_proxy) {
+    plan.legs.emplace_back(src, src_proxy);
+  }
+  if (src_proxy != dst_proxy) {
+    plan.legs.emplace_back(src_proxy, dst_proxy);
+  }
+  if (dst_proxy != dst) {
+    plan.legs.emplace_back(dst_proxy, dst);
+  }
+
+  plan.use_pxn = !plan.legs.empty();
+  return plan;
+}
+
+Ns3PxnPlan ns3_find_generic_pxn_plan(int src, int dst) {
+  Ns3PxnPlan plan;
+  std::vector<int> src_candidates = ns3_local_gpu_candidates(src);
+  std::vector<int> dst_candidates = ns3_local_gpu_candidates(dst);
+
+  for (int src_proxy : src_candidates) {
+    for (int dst_proxy : dst_candidates) {
+      if (src_proxy == src && dst_proxy == dst) {
+        continue;
+      }
+      plan = ns3_make_plan_from_proxies(src, dst, src_proxy, dst_proxy);
+      if (plan.use_pxn) {
+        return plan;
+      }
+    }
+  }
+
+  return plan;
+}
+
+void ns3_print_pxn_summary() {
+  std::cout << "[PXN SUMMARY] policy=" << ns3_pxn_policy_name(ns3_pxn_policy())
+            << " split=" << ns3_pxn_split_count
+            << " direct_cross_rail=" << ns3_pxn_direct_cross_rail_count
+            << std::endl;
+}
+
+int ns3_pxn_proxy(int src, int dst) {
+  int gpus = static_cast<int>(gpus_per_server);
+  return (src / gpus) * gpus + (dst % gpus);
+}
+
+Ns3PxnPlan ns3_build_pxn_plan(int src, int dst) {
+  Ns3PxnPlan plan;
+  bool direct_available = ns3_has_direct_route(src, dst);
+  bool cross_rail = ns3_needs_pxn(src, dst);
+  PxnPolicy policy = ns3_pxn_policy();
+
+  if (policy == PxnPolicy::Off) {
+    return plan;
+  }
+
+  if (policy == PxnPolicy::Fallback && direct_available) {
+    return plan;
+  }
+
+  if ((policy == PxnPolicy::Force || policy == PxnPolicy::Aggregate) &&
+      cross_rail) {
+    int src_proxy = ns3_pxn_proxy(src, dst);
+    plan = ns3_make_plan_from_proxies(src, dst, src_proxy, dst);
+    if (plan.use_pxn) {
+      return plan;
+    }
+  }
+
+  if (!direct_available) {
+    return ns3_find_generic_pxn_plan(src, dst);
+  }
+
+  return plan;
+}
+
 bool is_sending_finished(int src,int dst,AstraSim::ncclFlowTag flowTag){
   int tag_id = flowTag.current_flow_id;
   if (waiting_to_sent_callback.count(
@@ -104,8 +408,11 @@ bool is_receive_finished(int src,int dst,AstraSim::ncclFlowTag flowTag){
   return false;
 }
 
-void SendFlow(int src, int dst, uint64_t maxPacketCount,
-              void (*msg_handler)(void *fun_arg), void *fun_arg, int tag, AstraSim::sim_request *request) {
+void SendFlowPhysical(int src, int dst, uint64_t maxPacketCount,
+              void (*msg_handler)(void *fun_arg), void *fun_arg, int tag, AstraSim::sim_request *request,
+              PxnLegKind leg_kind, int original_src, int original_dst,
+              const std::vector<std::pair<int, int>>& pxn_legs = {},
+              size_t next_leg_index = 0) {
   MockNcclLog*NcclLog = MockNcclLog::getInstance();
   uint64_t PacketCount=((maxPacketCount+_QPS_PER_CONNECTION_-1)/_QPS_PER_CONNECTION_);
   uint64_t leftPacketCount = maxPacketCount;
@@ -118,6 +425,20 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
       MtpInterface::explicitCriticalSection cs;
       #endif
       sender_src_port_map[make_pair(port, make_pair(src, dst))] = request->flowTag;
+      if (leg_kind != PxnLegKind::None) {
+        PxnLegContext ctx;
+        ctx.kind = leg_kind;
+        ctx.original_src = original_src;
+        ctx.original_dst = original_dst;
+        ctx.tag = tag;
+        ctx.count = maxPacketCount;
+        ctx.fun_arg = fun_arg;
+        ctx.msg_handler = msg_handler;
+        ctx.request = *request;
+        ctx.legs = pxn_legs;
+        ctx.next_leg_index = next_leg_index;
+        pxn_leg_context[make_pair(port, make_pair(src, dst))] = ctx;
+      }
       #ifdef NS3_MTP
       cs.ExitSection();
       #endif
@@ -153,14 +474,46 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
     #endif
     ApplicationContainer appCon = clientHelper.Install(n.Get(src));
     appCon.Start(Time(send_lat));
-    waiting_to_sent_callback[std::make_pair(request->flowTag.current_flow_id,std::make_pair(src,dst))]++;
-    waiting_to_notify_receiver[std::make_pair(request->flowTag.current_flow_id,std::make_pair(src,dst))]++;
+    if (leg_kind != PxnLegKind::Local) {
+      waiting_to_sent_callback[std::make_pair(request->flowTag.current_flow_id,std::make_pair(original_src,original_dst))]++;
+      waiting_to_notify_receiver[std::make_pair(request->flowTag.current_flow_id,std::make_pair(original_src,original_dst))]++;
+    }
     #ifdef NS3_MTP
     cs.ExitSection();
     #endif
   }
-  NcclLog->writeLog(NcclLogLevel::DEBUG,"waiting_to_notify_receiver  current_flow_id  %d src  %d dst  %d count  %d",request->flowTag.current_flow_id,src,dst,waiting_to_notify_receiver[std::make_pair(request->flowTag.tag_id,std::make_pair(src,dst))]);
+  NcclLog->writeLog(NcclLogLevel::DEBUG,"waiting_to_notify_receiver  current_flow_id  %d src  %d dst  %d count  %d",request->flowTag.current_flow_id,original_src,original_dst,waiting_to_notify_receiver[std::make_pair(request->flowTag.current_flow_id,std::make_pair(original_src,original_dst))]);
   }
+}
+
+void SendFlow(int src, int dst, uint64_t maxPacketCount,
+              void (*msg_handler)(void *fun_arg), void *fun_arg, int tag, AstraSim::sim_request *request) {
+  bool cross_rail = ns3_needs_pxn(src, dst);
+  Ns3PxnPlan pxn_plan = ns3_build_pxn_plan(src, dst);
+  bool use_pxn = pxn_plan.use_pxn;
+  if (cross_rail) {
+    if (use_pxn) {
+      ns3_pxn_split_count++;
+    } else {
+      ns3_pxn_direct_cross_rail_count++;
+    }
+  }
+  if (use_pxn) {
+    auto first_leg = pxn_plan.legs.front();
+    PxnLegKind first_kind =
+        pxn_plan.legs.size() == 1 ? PxnLegKind::Remote : PxnLegKind::Local;
+    MockNcclLog* NcclLog = MockNcclLog::getInstance();
+    NcclLog->writeLog(NcclLogLevel::DEBUG,
+        "[PXN] policy %s split logical flow src %d dst %d first_leg %d -> %d legs %zu",
+        ns3_pxn_policy_name(ns3_pxn_policy()), src, dst, first_leg.first,
+        first_leg.second, pxn_plan.legs.size());
+    SendFlowPhysical(first_leg.first, first_leg.second, maxPacketCount,
+                     msg_handler, fun_arg, tag, request, first_kind, src, dst,
+                     pxn_plan.legs, 1);
+    return;
+  }
+  SendFlowPhysical(src, dst, maxPacketCount, msg_handler, fun_arg, tag, request,
+                   PxnLegKind::None, src, dst);
 }
 
 void notify_receiver_receive_data(int sender_node, int receiver_node,
@@ -305,13 +658,13 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
           (CustomHeader::GetStaticWholeHeaderSize() -
            IntHeader::GetStaticSize()); 
   uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b;
-  fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu\n", q->sip.Get(), q->dip.Get(),
-          q->sport, q->dport, q->m_size, q->startTime.GetTimeStep(),
-          (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct);
-  fflush(fout);
 
   AstraSim::ncclFlowTag flowTag;
   uint64_t notify_size;
+  int notify_src = sid;
+  int notify_dst = did;
+  PxnLegContext pxn_ctx;
+  bool has_pxn_ctx = false;
   {
     #ifdef NS3_MTP
     MtpInterface::explicitCriticalSection cs;
@@ -321,32 +674,75 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     rdma->m_rdma->DeleteRxQp(q->sip.Get(), q->m_pg, q->sport);
     MockNcclLog* NcclLog = MockNcclLog::getInstance();
     NcclLog->writeLog(NcclLogLevel::DEBUG,"qp finish, src:  %d did:  %d port:  %d total bytes:  %llu at the tick:  %d",sid,did,q->sport,q->m_size,AstraSim::Sys::boostedTick());
-    if (sender_src_port_map.find(make_pair(q->sport, make_pair(sid, did))) ==
+    auto flow_key = make_pair(q->sport, make_pair(sid, did));
+    if (sender_src_port_map.find(flow_key) ==
         sender_src_port_map.end()) {
       NcclLog->writeLog(NcclLogLevel::ERROR,"could not find the tag, there must be something wrong");
       exit(-1);
     }
-    flowTag = sender_src_port_map[make_pair(q->sport, make_pair(sid, did))];
-    sender_src_port_map.erase(make_pair(q->sport, make_pair(sid, did)));
-    received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))]+=q->m_size;
-    if(!is_receive_finished(sid,did,flowTag)) {
+    flowTag = sender_src_port_map[flow_key];
+    sender_src_port_map.erase(flow_key);
+    if (pxn_leg_context.find(flow_key) != pxn_leg_context.end()) {
+      pxn_ctx = pxn_leg_context[flow_key];
+      has_pxn_ctx = true;
+      pxn_leg_context.erase(flow_key);
+    }
+    PxnLogFields log_fields =
+        build_pxn_log_fields(sid, did, flowTag, has_pxn_ctx, pxn_ctx);
+    fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu %d %d %s %zu %zu %d\n",
+            q->sip.Get(), q->dip.Get(), q->sport, q->dport, q->m_size,
+            q->startTime.GetTimeStep(),
+            (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct,
+            log_fields.original_src, log_fields.original_dst,
+            log_fields.leg_kind, log_fields.leg_index, log_fields.leg_count,
+            log_fields.flow_id);
+    fflush(fout);
+    if (has_pxn_ctx && pxn_ctx.kind == PxnLegKind::Local) {
+      if (pxn_ctx.next_leg_index >= pxn_ctx.legs.size()) {
+        NcclLog->writeLog(NcclLogLevel::ERROR,
+            "PXN local leg completed but no next leg exists, original src %d dst %d",
+            pxn_ctx.original_src, pxn_ctx.original_dst);
+        exit(-1);
+      }
+      auto next_leg = pxn_ctx.legs[pxn_ctx.next_leg_index];
+      PxnLegKind next_kind =
+          pxn_ctx.next_leg_index + 1 >= pxn_ctx.legs.size()
+              ? PxnLegKind::Remote
+              : PxnLegKind::Local;
+      #ifdef NS3_MTP
+      cs.ExitSection();
+      #endif
+      SendFlowPhysical(next_leg.first, next_leg.second, pxn_ctx.count, pxn_ctx.msg_handler,
+                       pxn_ctx.fun_arg, pxn_ctx.tag, &pxn_ctx.request,
+                       next_kind, pxn_ctx.original_src, pxn_ctx.original_dst,
+                       pxn_ctx.legs, pxn_ctx.next_leg_index + 1);
+      return;
+    }
+    if (has_pxn_ctx && pxn_ctx.kind == PxnLegKind::Remote) {
+      notify_src = pxn_ctx.original_src;
+      notify_dst = pxn_ctx.original_dst;
+    }
+    received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(notify_src,notify_dst))]+=q->m_size;
+    if(!is_receive_finished(notify_src,notify_dst,flowTag)) {
       #ifdef NS3_MTP
       cs.ExitSection();
       #endif
       return; 
     }
-    notify_size = received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))];
-    received_chunksize.erase(std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did)));    
+    notify_size = received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(notify_src,notify_dst))];
+    received_chunksize.erase(std::make_pair(flowTag.current_flow_id,std::make_pair(notify_src,notify_dst)));    
     #ifdef NS3_MTP
     cs.ExitSection();
     #endif
   }
-  notify_receiver_receive_data(sid, did, notify_size, flowTag);
+  notify_receiver_receive_data(notify_src, notify_dst, notify_size, flowTag);
 }
 
 void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
   uint32_t sid = ip_to_node_id(q->sip), did = ip_to_node_id(q->dip);
   AstraSim::ncclFlowTag flowTag;
+  int notify_src = sid;
+  int notify_dst = did;
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
   NcclLog->writeLog(NcclLogLevel::DEBUG,"[Packet sent from NIC] send finish, src:  %d did:  %d port:  %d srcip  %d dstip  %d total bytes:  %llu at the tick:  %d",sid,did,q->sport,q->sip,q->dip,q->m_size,AstraSim::Sys::boostedTick());
   uint64_t all_sent_chunksize;
@@ -354,21 +750,54 @@ void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     #ifdef NS3_MTP
     MtpInterface::explicitCriticalSection cs;
     #endif
-    flowTag = sender_src_port_map[make_pair(q->sport, make_pair(sid, did))];
-    sent_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))]+=q->m_size;
-    if(!is_sending_finished(sid,did,flowTag)) {
+    auto flow_key = make_pair(q->sport, make_pair(sid, did));
+    if (sender_src_port_map.find(flow_key) == sender_src_port_map.end()) {
+      NcclLog->writeLog(NcclLogLevel::ERROR,"could not find the tag in send_finish");
+      exit(-1);
+    }
+    flowTag = sender_src_port_map[flow_key];
+    PxnLegContext pxn_ctx;
+    bool has_pxn_ctx = false;
+    if (pxn_leg_context.find(flow_key) != pxn_leg_context.end()) {
+      pxn_ctx = pxn_leg_context[flow_key];
+      has_pxn_ctx = true;
+    }
+    PxnLogFields log_fields =
+        build_pxn_log_fields(sid, did, flowTag, has_pxn_ctx, pxn_ctx);
+    fprintf(fout, "%08x %08x %u %u %lu %lu %lu %d %d %s %zu %zu %d\n",
+            q->sip.Get(), q->dip.Get(), q->sport, q->dport, q->m_size,
+            q->startTime.GetTimeStep(),
+            (Simulator::Now() - q->startTime).GetTimeStep(),
+            log_fields.original_src, log_fields.original_dst,
+            log_fields.leg_kind, log_fields.leg_index, log_fields.leg_count,
+            log_fields.flow_id);
+    fflush(fout);
+    if (has_pxn_ctx) {
+      if (pxn_ctx.kind == PxnLegKind::Local) {
+        #ifdef NS3_MTP
+        cs.ExitSection();
+        #endif
+        return;
+      }
+      if (pxn_ctx.kind == PxnLegKind::Remote) {
+        notify_src = pxn_ctx.original_src;
+        notify_dst = pxn_ctx.original_dst;
+      }
+    }
+    sent_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(notify_src,notify_dst))]+=q->m_size;
+    if(!is_sending_finished(notify_src,notify_dst,flowTag)) {
       #ifdef NS3_MTP
       cs.ExitSection();
       #endif
       return;
     }
-    all_sent_chunksize = sent_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))];
-    sent_chunksize.erase(std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did)));
+    all_sent_chunksize = sent_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(notify_src,notify_dst))];
+    sent_chunksize.erase(std::make_pair(flowTag.current_flow_id,std::make_pair(notify_src,notify_dst)));
     #ifdef NS3_MTP
     cs.ExitSection();
     #endif
   }
-  notify_sender_sending_finished(sid, did, all_sent_chunksize, flowTag);
+  notify_sender_sending_finished(notify_src, notify_dst, all_sent_chunksize, flowTag);
 }
 
 int main1(string network_topo,string network_conf) {
@@ -379,6 +808,10 @@ int main1(string network_topo,string network_conf) {
     return -1;
   SetConfig();
   SetupNetwork(qp_finish,send_finish);
+  if (!qlen_mon_file.empty() || !bw_mon_file.empty() ||
+      !rate_mon_file.empty() || !cnp_mon_file.empty()) {
+    schedule_monitor();
+  }
 
 std::cout << "Running Simulation.\n";
   fflush(stdout);

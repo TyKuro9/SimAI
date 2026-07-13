@@ -398,6 +398,7 @@ int main(int argc, char *argv[]) {
   }
 
   Simulator::Destroy();
+  ns3_print_pxn_summary();
   
   #ifdef NS3_MPI
   MpiInterface::Disable ();

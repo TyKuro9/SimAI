@@ -305,7 +305,7 @@ bool NcclTreeFlowModel::init_recv_ready() {
   std::map<std::pair<int,std::vector<int>>,std::vector<int>> recv_ready_flows; 
   for(auto flow : _flow_models){
     if(flow.second.src!=id)  continue;
-    if(flow.second.chunk_id!=0)continue; 
+    if(flow.second.chunk_id!=0 && flow.second.conn_type != "PXN_REMOTE")continue; 
     if (flow.second.parent_flow_id.size() == 0)
       continue;
     std::pair<int, std::vector<int>> cur =
@@ -357,7 +357,10 @@ bool NcclTreeFlowModel::recv_ready(int channel_id, int flow_id) {
     ehd->flowTag.child_flow_id = -1;
     ehd->flowTag.current_flow_id = -1;
     ehd->flowTag.channel_id = channel_id;
-    ehd->flowTag.tag_id =layer_num*flow_model.chunk_count*m_channels+ flow_model.chunk_count*flow_model.channel_id;
+    ehd->flowTag.tag_id = layer_num*flow_model.chunk_count*m_channels + flow_model.chunk_count*flow_model.channel_id + flow_model.chunk_id;
+    if (flow_model.parent_flow_id.size() != 0 && flow_model.conn_type != "RING") {
+      ehd->flowTag.tag_id += 1;
+    }
       stream->owner->front_end_sim_recv(
           0,
           Sys::dummy_data,
@@ -579,6 +582,9 @@ bool NcclTreeFlowModel::ready(int channel_id, int flow_id) {
       this->_flow_models[std::make_pair(channel_id, flow_id)];
   snd_req.flowTag.tag_id = layer_num * flow_model.chunk_count * m_channels +
       flow_model.channel_id * flow_model.chunk_count + flow_model.chunk_id;
+  if (flow_model.parent_flow_id.size() != 0 && flow_model.conn_type != "RING") {
+    snd_req.flowTag.tag_id += 1;
+  }
   snd_req.flowTag.channel_id = channel_id;
   snd_req.flowTag.flow_size = flow_model.flow_size;
   snd_req.flowTag.current_flow_id = flow_id;
@@ -714,6 +720,9 @@ bool NcclTreeFlowModel::phy_ready(int channel_id,int flow_id) {
       this->_flow_models[std::make_pair(channel_id, flow_id)];
   snd_req.flowTag.tag_id = layer_num * flow_model.chunk_count * m_channels +
       flow_model.channel_id * flow_model.chunk_count + flow_model.chunk_id;
+  if (flow_model.parent_flow_id.size() != 0 && flow_model.conn_type != "RING") {
+    snd_req.flowTag.tag_id += 1;
+  }
   snd_req.flowTag.channel_id = channel_id;
   snd_req.flowTag.flow_size = flow_model.flow_size;
   snd_req.flowTag.current_flow_id = flow_id;
