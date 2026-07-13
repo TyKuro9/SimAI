@@ -21,6 +21,9 @@ PacketBundle::PacketBundle(
   this->send_back = send_back;
   this->size = size;
   this->stream = stream;
+  this->phase_owner = stream->my_current_phase.algorithm;
+  this->phase_generation =
+      stream->phase_generation.load(std::memory_order_acquire);
   this->transmition = transmition;
   creation_time = Sys::boostedTick();
   this->channel_id = -1;
@@ -41,6 +44,9 @@ PacketBundle::PacketBundle(
   this->send_back = send_back;
   this->size = size;
   this->stream = stream;
+  this->phase_owner = stream->my_current_phase.algorithm;
+  this->phase_generation =
+      stream->phase_generation.load(std::memory_order_acquire);
   this->transmition = transmition;
   this->channel_id = channel_id;
   this->flow_id = flow_id;
@@ -58,6 +64,9 @@ PacketBundle::PacketBundle(
   this->send_back = send_back;
   this->size = size;
   this->stream = stream;
+  this->phase_owner = stream->my_current_phase.algorithm;
+  this->phase_generation =
+      stream->phase_generation.load(std::memory_order_acquire);
   this->transmition = transmition;
   creation_time = Sys::boostedTick();
   this->channel_id = -1;
@@ -76,7 +85,17 @@ void PacketBundle::call(EventType event, CallData* data) {
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
   NcclLog->writeLog(NcclLogLevel::DEBUG,"packet bundle call");
 #if defined(HTSIM_BACKEND) || defined(NS3_MTP) || defined(NS3_MPI)
-  if (stream == nullptr || stream->state == StreamState::Dead) {
+  if (stream == nullptr) {
+    delete this;
+    return;
+  }
+#endif
+  std::lock_guard<std::recursive_mutex> lock(stream->phase_mutex);
+#if defined(HTSIM_BACKEND) || defined(NS3_MTP) || defined(NS3_MPI)
+  if (stream->state == StreamState::Dead ||
+      phase_owner != stream->my_current_phase.algorithm ||
+      phase_generation !=
+          stream->phase_generation.load(std::memory_order_acquire)) {
     delete this;
     return;
   }

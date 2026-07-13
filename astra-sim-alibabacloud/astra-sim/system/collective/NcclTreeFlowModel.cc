@@ -23,6 +23,7 @@
 #include "astra-sim/system/PacketBundle.hh"
 #include "astra-sim/system/RecvPacketEventHadndlerData.hh"
 #include "astra-sim/system/MockNcclLog.h"
+#include <cstdlib>
 #ifdef PHY_RDMA
 #include "astra-sim/system/SimAiFlowModelRdma.hh"
 extern FlowPhyRdma flow_rdma;
@@ -71,6 +72,143 @@ int packed_treeflow_tag_id(int layer, int stream, int intra) {
   mix(static_cast<uint32_t>(intra));
   return static_cast<int>(hash & 0x7fffffffu);
 }
+
+#ifdef NS3_MTP
+int packed_ns3_treeflow_tag_id(
+    int layer,
+    int stream,
+    int intra,
+    uint64_t phase_generation) {
+  constexpr int kGenerationBits = 5;
+  constexpr int kIntraBits = 8;
+  constexpr int kStreamBits = 12;
+  constexpr int kLayerBits =
+      31 - kGenerationBits - kStreamBits - kIntraBits;
+  constexpr int kMaxGeneration = (1 << kGenerationBits) - 1;
+  constexpr int kMaxIntra = (1 << kIntraBits) - 1;
+  constexpr int kMaxStream = (1 << kStreamBits) - 1;
+  constexpr int kMaxLayer = (1 << kLayerBits) - 1;
+  if (phase_generation <= static_cast<uint64_t>(kMaxGeneration) &&
+      layer >= 0 && layer <= kMaxLayer && stream >= 0 &&
+      stream <= kMaxStream && intra >= 0 && intra <= kMaxIntra) {
+    return (static_cast<int>(phase_generation) <<
+            (kLayerBits + kStreamBits + kIntraBits)) |
+        (layer << (kStreamBits + kIntraBits)) |
+        (stream << kIntraBits) | intra;
+  }
+
+  uint32_t hash = 2166136261u;
+  auto mix = [&hash](uint32_t value) {
+    hash ^= value;
+    hash *= 16777619u;
+  };
+  mix(static_cast<uint32_t>(phase_generation));
+  mix(static_cast<uint32_t>(layer));
+  mix(static_cast<uint32_t>(stream));
+  mix(static_cast<uint32_t>(intra));
+  return static_cast<int>(hash & 0x7fffffffu);
+}
+#endif
+
+#ifdef NS3_MTP
+std::atomic<int> ns3_tree_flow_trace_count{0};
+std::atomic<int> ns3_tree_receive_trace_count{0};
+std::atomic<int> ns3_receive_gate_trace_count{0};
+
+bool ns3_receive_gate_trace_enabled() {
+  static const bool enabled = []() {
+    const char* value = std::getenv("AS_NS3_TREE_GATE_DIAG");
+    return value != nullptr && value[0] == '1';
+  }();
+  return enabled;
+}
+
+void trace_ns3_tree_flow(
+    const char* phase,
+    int rank,
+    int layer,
+    int stream_num,
+    int channel_id,
+    const MockNccl::SingleFlow& flow,
+    const std::vector<int>& recv_prevs) {
+  if (!ns3_receive_gate_trace_enabled() || layer != 0 || stream_num != 49 ||
+      flow.chunk_id < 14) {
+    return;
+  }
+  int sequence = ns3_tree_flow_trace_count.fetch_add(1);
+  if (sequence >= 500) {
+    return;
+  }
+  std::cerr << "[NS3 tree diag] " << phase
+            << " rank=" << rank
+            << " layer=" << layer
+            << " stream=" << stream_num
+            << " channel=" << channel_id
+            << " flow=" << flow.flow_id
+            << " edge=" << flow.src << "->" << flow.dest
+            << " chunk=" << flow.chunk_id << "/" << flow.chunk_count
+            << " prev=";
+  for (size_t i = 0; i < flow.prev.size(); ++i) {
+    if (i != 0) {
+      std::cerr << ",";
+    }
+    std::cerr << flow.prev[i];
+  }
+  std::cerr << " parent=";
+  for (size_t i = 0; i < flow.parent_flow_id.size(); ++i) {
+    if (i != 0) {
+      std::cerr << ",";
+    }
+    std::cerr << flow.parent_flow_id[i];
+  }
+  std::cerr << " child=";
+  for (size_t i = 0; i < flow.child_flow_id.size(); ++i) {
+    if (i != 0) {
+      std::cerr << ",";
+    }
+    std::cerr << flow.child_flow_id[i];
+  }
+  std::cerr << " recv_prevs=";
+  for (size_t i = 0; i < recv_prevs.size(); ++i) {
+    if (i != 0) {
+      std::cerr << ",";
+    }
+    std::cerr << recv_prevs[i];
+  }
+  std::cerr << std::endl;
+}
+
+void trace_ns3_receive_gate(
+    const char* phase,
+    int rank,
+    int layer,
+    int stream_num,
+    int channel_id,
+    const MockNccl::SingleFlow& flow,
+    int recv_prev,
+    int free_count,
+    int recv_remaining) {
+  if (!ns3_receive_gate_trace_enabled()) {
+    return;
+  }
+  int sequence = ns3_receive_gate_trace_count.fetch_add(1);
+  if (sequence >= 1000) {
+    return;
+  }
+  std::cerr << "[NS3 receive gate] " << phase
+            << " rank=" << rank
+            << " layer=" << layer
+            << " stream=" << stream_num
+            << " channel=" << channel_id
+            << " flow=" << flow.flow_id
+            << " edge=" << flow.src << "->" << flow.dest
+            << " chunk=" << flow.chunk_id << "/" << flow.chunk_count
+            << " recv_prev=" << recv_prev
+            << " free_before_or_after=" << free_count
+            << " recv_remaining=" << recv_remaining << std::endl;
+}
+
+#endif
 } // namespace
 
 std::atomic<bool> NcclTreeFlowModel::g_flow_inCriticalSection(false);
@@ -127,7 +265,7 @@ NcclTreeFlowModel::NcclTreeFlowModel(
       if(f.second.dest == id) {
           this->free_packets[std::make_pair(f.second.channel_id,f.second.src)]++;
           this->_flow_models[f.first] = f.second;
-          recv_packets++;
+      recv_packets++;
         }
       if(f.second.src == id) {
         if(pQps->peer_qps.count(std::make_pair(f.second.channel_id,std::make_pair(f.second.src,f.second.dest)))==0){
@@ -191,35 +329,21 @@ int NcclTreeFlowModel::tag_id_for_flow(
       flow_model.conn_type != "RING") {
     intra_tag += 1;
   }
+#ifdef NS3_MTP
+  uint64_t phase_generation = stream == nullptr
+      ? 0
+      : stream->phase_generation.load(std::memory_order_acquire);
+  return packed_ns3_treeflow_tag_id(
+      layer_num, stream_tag, intra_tag, phase_generation);
+#else
   return packed_treeflow_tag_id(layer_num, stream_tag, intra_tag);
+#endif
 }
 
 int NcclTreeFlowModel::tag_id_for_receive_from(
     const MockNccl::SingleFlow& flow_model,
     int recv_prev) const {
-  for (int parent_flow_id : flow_model.parent_flow_id) {
-    auto parent_it =
-        _flow_models.find(std::make_pair(flow_model.channel_id, parent_flow_id));
-    if (parent_it == _flow_models.end()) {
-      continue;
-    }
-    const MockNccl::SingleFlow& parent_flow = parent_it->second;
-    if (parent_flow.src == recv_prev && parent_flow.dest == id) {
-      return tag_id_for_flow(parent_flow, false);
-    }
-  }
-
-  for (const auto& entry : _flow_models) {
-    const MockNccl::SingleFlow& candidate = entry.second;
-    if (candidate.channel_id == flow_model.channel_id &&
-        candidate.src == recv_prev && candidate.dest == id &&
-        candidate.chunk_id == flow_model.chunk_id &&
-        candidate.chunk_count == flow_model.chunk_count &&
-        candidate.flow_size == flow_model.flow_size) {
-      return tag_id_for_flow(candidate, false);
-    }
-  }
-
+  (void)recv_prev;
   return tag_id_for_flow(flow_model, true);
 }
 
@@ -253,6 +377,29 @@ void NcclTreeFlowModel::run(EventType event, CallData* data) {
     int received_flow_id = flowTag.current_flow_id;
     int channel_id = flowTag.channel_id;
     std::vector<int> next_flow_list = flowTag.tree_flow_list;
+#ifdef NS3_MTP
+    bool trace_receive = ns3_receive_gate_trace_enabled() &&
+        layer_num == 0 && stream != nullptr &&
+        stream->stream_num == 49 && flowTag.tag_id >= 12558 &&
+        ns3_tree_receive_trace_count.fetch_add(1) < 500;
+    if (trace_receive) {
+      std::cerr << "[NS3 tree rx] rank=" << id
+                << " stream=" << stream->stream_num
+                << " channel=" << channel_id
+                << " flow=" << received_flow_id
+                << " edge=" << flowTag.sender_node << "->"
+                << flowTag.receiver_node
+                << " tag=" << flowTag.tag_id
+                << " children=";
+      for (size_t i = 0; i < next_flow_list.size(); ++i) {
+        if (i != 0) {
+          std::cerr << ",";
+        }
+        std::cerr << next_flow_list[i];
+      }
+      std::cerr << std::endl;
+    }
+#endif
     int sender_free_packets = 0;
     #ifdef PHY_MTP
     recv_packets--;
@@ -260,6 +407,9 @@ void NcclTreeFlowModel::run(EventType event, CallData* data) {
       return;
     }
     #else
+    if (recv_packets.load(std::memory_order_acquire) > 0) {
+      recv_packets.fetch_sub(1, std::memory_order_acq_rel);
+    }
     bool flow_exist = next_flow_list.size() == 0 ? true : false;
     {
       NcclTreeFlowModel::FlowCriticalSection cs;
@@ -280,8 +430,22 @@ void NcclTreeFlowModel::run(EventType event, CallData* data) {
     {
       NcclTreeFlowModel::FlowCriticalSection cs;
       auto sender_key = std::make_pair(channel_id, flowTag.sender_node);
+      int free_before = map_value_or_zero(free_packets, sender_key);
       free_packets[sender_key]--;
       sender_free_packets = free_packets[sender_key];
+#ifdef NS3_MTP
+      if (free_before <= 1 || sender_free_packets < 0) {
+        auto received_it = _flow_models.find(
+            std::make_pair(channel_id, received_flow_id));
+        if (received_it != _flow_models.end()) {
+          trace_ns3_receive_gate(
+              "packet_received", id, layer_num,
+              stream == nullptr ? -1 : stream->stream_num, channel_id,
+              received_it->second, flowTag.sender_node, sender_free_packets,
+              recv_packets.load(std::memory_order_acquire));
+        }
+      }
+#endif
       for (uint32_t i = 0; i < m_channels; i++) {
         if (map_value_or_zero(_stream_count, i) != 0) {
           tag = false;
@@ -289,7 +453,12 @@ void NcclTreeFlowModel::run(EventType event, CallData* data) {
         }
       }
     }
-    if(tag) {
+#ifdef NS3_MTP
+    // A completed local sender can still receive a parent that unlocks a child.
+    if (tag && next_flow_list.empty()) {
+#else
+    if (tag) {
+#endif
       ready(channel_id, -1);
       iteratable(channel_id);
       return;
@@ -317,9 +486,36 @@ void NcclTreeFlowModel::run(EventType event, CallData* data) {
           flow_exist = false;
           break;
         }
+        int indegree_before = indegree_it->second;
         if (--indegree_it->second == 0) {
           ready_flow_ids.push_back(next_flow_id);
         }
+#ifdef NS3_MTP
+        if (trace_receive) {
+          auto child_it = _flow_models.find(
+              std::make_pair(channel_id, next_flow_id));
+          std::cerr << "[NS3 tree rx child] rank=" << id
+                    << " stream=" << stream->stream_num
+                    << " child=" << next_flow_id
+                    << " indegree=" << indegree_before << "->"
+                    << indegree_it->second;
+          if (child_it != _flow_models.end()) {
+            std::cerr << " edge=" << child_it->second.src << "->"
+                      << child_it->second.dest
+                      << " chunk=" << child_it->second.chunk_id
+                      << " parent=";
+            for (size_t i = 0; i < child_it->second.parent_flow_id.size(); ++i) {
+              if (i != 0) {
+                std::cerr << ",";
+              }
+              std::cerr << child_it->second.parent_flow_id[i];
+            }
+          } else {
+            std::cerr << " missing_local_flow";
+          }
+          std::cerr << std::endl;
+        }
+#endif
       }
     }
     for (int next_flow_id : ready_flow_ids) {
@@ -466,19 +662,51 @@ bool NcclTreeFlowModel::recv_ready(int channel_id, int flow_id) {
     flow_model = flow_it->second;
   }
   recv_prevs = flow_model.prev;
+#ifdef NS3_MTP
+  trace_ns3_tree_flow(
+      "recv_ready", id, layer_num, stream == nullptr ? -1 : stream->stream_num,
+      channel_id, flow_model, recv_prevs);
+#endif
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
 
   for (int recv_prev : recv_prevs) {
     bool can_recv = false;
+    int free_count = 0;
     {
       NcclTreeFlowModel::FlowCriticalSection cs;
-      can_recv = map_value_or_zero(
-          free_packets,
-          std::make_pair(channel_id, recv_prev)) > 0;
+      free_count = map_value_or_zero(
+          free_packets, std::make_pair(channel_id, recv_prev));
+      can_recv = free_count > 0;
     }
     if (!can_recv) {
+#ifdef NS3_MTP
+      trace_ns3_receive_gate(
+          "recv_ready_skip", id, layer_num,
+          stream == nullptr ? -1 : stream->stream_num, channel_id,
+          flow_model, recv_prev, free_count,
+          recv_packets.load(std::memory_order_acquire));
+#endif
       continue;
     }
+    int receive_tag = tag_id_for_receive_from(flow_model, recv_prev);
+#ifdef NS3_MTP
+    {
+      NcclTreeFlowModel::FlowCriticalSection cs;
+      if (!posted_receive_tags
+               .insert(std::make_tuple(channel_id, recv_prev, receive_tag))
+               .second) {
+        trace_ns3_tree_flow(
+            "dedup_skip", id, layer_num,
+            stream == nullptr ? -1 : stream->stream_num, channel_id,
+            flow_model, std::vector<int>{recv_prev});
+        continue;
+      }
+    }
+    trace_ns3_tree_flow(
+        "post_recv", id, layer_num,
+        stream == nullptr ? -1 : stream->stream_num, channel_id, flow_model,
+        std::vector<int>{recv_prev});
+#endif
     sim_request rcv_req;
     rcv_req.vnet = this->stream->current_queue_id;
     rcv_req.layerNum = layer_num;
@@ -491,8 +719,10 @@ bool NcclTreeFlowModel::recv_ready(int channel_id, int flow_id) {
         1);
     ehd->flowTag.child_flow_id = -1;
     ehd->flowTag.current_flow_id = -1;
+    ehd->flow_id = flow_model.flow_id;
     ehd->flowTag.channel_id = channel_id;
-    ehd->flowTag.tag_id = tag_id_for_receive_from(flow_model, recv_prev);
+    ehd->flowTag.chunk_id = flow_model.chunk_id;
+    ehd->flowTag.tag_id = receive_tag;
     ehd->flowTag.sender_node = recv_prev;
     ehd->flowTag.receiver_node = id;
     ehd->flowTag.flow_size = flow_model.flow_size;
@@ -566,9 +796,13 @@ void NcclTreeFlowModel::process_stream_count(int channel_id) {
     }
     should_mark_zombie = stream_count == 0 && stream->state != StreamState::Dead;
   }
+  if (send_packets.load(std::memory_order_acquire) > 0) {
+    send_packets.fetch_sub(1, std::memory_order_acq_rel);
+  }
   NcclLog->writeLog(NcclLogLevel::DEBUG,"NcclTreeFlowModel::process_stream_count channel_id %d _stream_count %d",channel_id,stream_count);
-  if (should_mark_zombie)
+  if (should_mark_zombie) {
     stream->changeState(StreamState::Zombie);
+  }
   #endif
 }
 
@@ -582,6 +816,7 @@ void NcclTreeFlowModel::reduce(int channel_id, int flow_id) {
       packet_it->second.pop_front();
     }
   }
+  iteratable(channel_id);
   #endif
 }
 
@@ -600,7 +835,9 @@ bool NcclTreeFlowModel::iteratable(int channel_id) {
   }
   cs.ExitSection();
   if (all_channel_finished == true &&
-      all_packets_freed == true) {
+      all_packets_freed == true &&
+      send_packets.load(std::memory_order_acquire) == 0 &&
+      recv_packets.load(std::memory_order_acquire) == 0) {
     exit();
     return false;
   }
@@ -707,10 +944,17 @@ bool NcclTreeFlowModel::ready(int channel_id, int flow_id) {
   {
     NcclTreeFlowModel::FlowCriticalSection cs;
     auto packet_it = packets.find(std::make_pair(channel_id, flow_id));
+#ifdef NS3_MTP
+    // A late child can be inserted after the last root send completes.
+    if (!enabled ||
+        packet_it == packets.end() ||
+        packet_it->second.empty()) {
+#else
     if (!enabled ||
         packet_it == packets.end() ||
         packet_it->second.empty() ||
         map_value_or_zero(_stream_count, channel_id) == 0) {
+#endif
       NcclLog->writeLog(NcclLogLevel::DEBUG,"NcclTreeFlowModel not ready!");
       return false;
     }
@@ -719,13 +963,41 @@ bool NcclTreeFlowModel::ready(int channel_id, int flow_id) {
     packet = packet_it->second.front();
     flow_model = flow_it->second;
     for (int recv_prev : flow_model.prev) {
-      if (map_value_or_zero(
-              free_packets, std::make_pair(channel_id, recv_prev)) > 0) {
+      int free_count = map_value_or_zero(
+          free_packets, std::make_pair(channel_id, recv_prev));
+      if (free_count > 0) {
         ready_recv_prevs.push_back(recv_prev);
+      } else {
+#ifdef NS3_MTP
+        trace_ns3_receive_gate(
+            "ready_skip", id, layer_num,
+            stream == nullptr ? -1 : stream->stream_num, channel_id,
+            flow_model, recv_prev, free_count,
+            recv_packets.load(std::memory_order_acquire));
+#endif
       }
     }
   }
   for (int recv_prev : ready_recv_prevs) {
+    int receive_tag = tag_id_for_receive_from(flow_model, recv_prev);
+#ifdef NS3_MTP
+    {
+      NcclTreeFlowModel::FlowCriticalSection cs;
+      if (!posted_receive_tags
+               .insert(std::make_tuple(channel_id, recv_prev, receive_tag))
+               .second) {
+        trace_ns3_tree_flow(
+            "dedup_skip", id, layer_num,
+            stream == nullptr ? -1 : stream->stream_num, channel_id,
+            flow_model, std::vector<int>{recv_prev});
+        continue;
+      }
+    }
+    trace_ns3_tree_flow(
+        "post_recv", id, layer_num,
+        stream == nullptr ? -1 : stream->stream_num, channel_id, flow_model,
+        std::vector<int>{recv_prev});
+#endif
     sim_request rcv_req;
     rcv_req.vnet = this->stream->current_queue_id;
     rcv_req.layerNum = layer_num;
@@ -739,8 +1011,10 @@ bool NcclTreeFlowModel::ready(int channel_id, int flow_id) {
         stream->stream_num);
     ehd->flowTag.child_flow_id = -1;
     ehd->flowTag.current_flow_id = -1;
-    ehd->flowTag.tag_id = tag_id_for_receive_from(flow_model, recv_prev);
+    ehd->flow_id = flow_model.flow_id;
+    ehd->flowTag.tag_id = receive_tag;
     ehd->flowTag.channel_id = channel_id;
+    ehd->flowTag.chunk_id = flow_model.chunk_id;
     ehd->flowTag.sender_node = recv_prev;
     ehd->flowTag.receiver_node = id;
     ehd->flowTag.flow_size = packet.msg_size;
@@ -757,6 +1031,11 @@ bool NcclTreeFlowModel::ready(int channel_id, int flow_id) {
         &Sys::handleEvent,
         ehd);
   }
+#ifdef NS3_MTP
+  trace_ns3_tree_flow(
+      "ready", id, layer_num, stream == nullptr ? -1 : stream->stream_num,
+      channel_id, flow_model, ready_recv_prevs);
+#endif
   sim_request snd_req;
   snd_req.srcRank = id;
   snd_req.dstRank = packet.preferred_dest;
@@ -799,6 +1078,13 @@ bool NcclTreeFlowModel::ready(int channel_id, int flow_id) {
 }
 
 void NcclTreeFlowModel::exit() {
+#ifdef NS3_MTP
+  if (stream != nullptr &&
+      stream->pending_receives.load(std::memory_order_acquire) != 0) {
+    stream->changeState(StreamState::Zombie);
+    return;
+  }
+#endif
   if (exited.exchange(true)) {
     return;
   }
@@ -828,7 +1114,9 @@ void NcclTreeFlowModel::exit() {
     }
   }
   #endif
-  stream->owner->proceed_to_next_vnet_baseline((StreamBaseline*)stream);
+  if (stream->state != StreamState::Dead) {
+    stream->owner->proceed_to_next_vnet_baseline((StreamBaseline*)stream);
+  }
   return;
 }
 

@@ -1892,6 +1892,14 @@ Tick Sys::boostedTick() {
   return tick + offset;
 }
 void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
+  std::lock_guard<std::recursive_mutex> phase_lock(stream->phase_mutex);
+#ifdef NS3_MTP
+  if (stream->pending_receives.load(std::memory_order_acquire) != 0) {
+    stream->changeState(StreamState::Zombie);
+    return;
+  }
+#endif
+  stream->phase_generation.fetch_add(1, std::memory_order_acq_rel);
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
   NcclLog->writeLog(NcclLogLevel::DEBUG,"proceed_to_next_vnet_baseline :: phase1, stream->current_queue_id %d stream->phases_to_go.size %d",stream->current_queue_id,stream->phases_to_go.size());
   int previous_vnet = stream->current_queue_id;
@@ -1902,7 +1910,12 @@ void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
     stream->net_message_latency.back() /= stream->net_message_counter;
   }
   if (stream->my_current_phase.algorithm != nullptr) {
-    delete stream->my_current_phase.algorithm;
+    Algorithm* completed_algorithm = stream->my_current_phase.algorithm;
+    if (stream->phase_callback_depth > 0) {
+      stream->deferred_algorithm_deletes.push_back(completed_algorithm);
+    } else {
+      delete completed_algorithm;
+    }
   }
   if (stream->phases_to_go.size() == 0) {
     stream->take_bus_stats_average();
@@ -1986,8 +1999,11 @@ int Sys::drain_finished_streams() {
       if (stream == nullptr) {
         continue;
       }
-      if (stream->phases_to_go.empty() &&
-          stream->state == StreamState::Zombie) {
+      if (stream->state == StreamState::Zombie
+#ifdef NS3_MTP
+          && stream->pending_receives.load(std::memory_order_acquire) == 0
+#endif
+      ) {
         proceed_to_next_vnet_baseline(static_cast<StreamBaseline*>(stream));
         return 1;
       }
@@ -2439,11 +2455,28 @@ void Sys::handleEvent(void* arg) {
   } else if (event == EventType::PacketReceived) {
     RecvPacketEventHadndlerData* rcehd = (RecvPacketEventHadndlerData*)ehd;
     StreamBaseline* owner = static_cast<StreamBaseline*>(rcehd->owner);
+#ifdef NS3_MTP
+    auto release_pending_receive = [owner]() {
+      if (owner != nullptr &&
+          owner->pending_receives.load(std::memory_order_acquire) != 0) {
+        owner->pending_receives.fetch_sub(1, std::memory_order_acq_rel);
+      }
+    };
+#endif
 #if defined(HTSIM_BACKEND) || defined(NS3_MTP) || defined(NS3_MPI)
-    if (owner == nullptr || owner->state == StreamState::Dead) {
+    if (owner == nullptr || owner->state == StreamState::Dead ||
+        rcehd->phase_owner != owner->my_current_phase.algorithm ||
+        rcehd->phase_generation !=
+            owner->phase_generation.load(std::memory_order_acquire)) {
+#ifdef NS3_MTP
+      release_pending_receive();
+#endif
       delete rcehd;
       return;
     }
+#endif
+#ifdef NS3_MTP
+    release_pending_receive();
 #endif
     owner->consume(rcehd);
     delete rcehd;
@@ -2511,7 +2544,10 @@ void Sys::handleEvent(void* arg) {
     AstraSim::SendPacketEventHandlerData* ehd = (AstraSim::SendPacketEventHandlerData*) arg;
     if(ehd->owner!=nullptr) {
 #if defined(HTSIM_BACKEND) || defined(NS3_MTP) || defined(NS3_MPI)
-      if (ehd->owner->state == StreamState::Dead) {
+      if (ehd->owner->state == StreamState::Dead ||
+          ehd->phase_owner != ehd->owner->my_current_phase.algorithm ||
+          ehd->phase_generation !=
+              ehd->owner->phase_generation.load(std::memory_order_acquire)) {
         delete ehd;
         return;
       }

@@ -26,6 +26,8 @@ class RecvPacketEventHadndlerData : public BasicEventHandlerData,
                                     public MetaData {
  public:
   BaseStream* owner;
+  const void* phase_owner;
+  uint64_t phase_generation;
   int vnet;
   int stream_num;
   bool message_end;

@@ -13,6 +13,9 @@ RecvPacketEventHadndlerData::RecvPacketEventHadndlerData(
     int stream_num)
     : BasicEventHandlerData(owner->owner, event) {
   this->owner = owner;
+  this->phase_owner = owner->my_current_phase.algorithm;
+  this->phase_generation =
+      owner->phase_generation.load(std::memory_order_acquire);
   this->vnet = vnet;
   this->stream_num = stream_num;
   this->message_end = true;
@@ -26,6 +29,9 @@ RecvPacketEventHadndlerData::RecvPacketEventHadndlerData(
     AstraSim::ncclFlowTag _flowTag)
     : BasicEventHandlerData(owner->owner, event) {
   this->owner = owner;
+  this->phase_owner = owner->my_current_phase.algorithm;
+  this->phase_generation =
+      owner->phase_generation.load(std::memory_order_acquire);
   this->flowTag = _flowTag;
 }
 

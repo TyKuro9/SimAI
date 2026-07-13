@@ -48,6 +48,9 @@ class NcclTreeFlowModel : public Algorithm {
   std::map<int, int> _stream_count; 
   std::atomic<int> send_packets;
   std::atomic<int> recv_packets;
+#ifdef NS3_MTP
+  std::set<std::tuple<int, int, int>> posted_receive_tags;
+#endif
   int parallel_reduce;
   std::map<std::pair<int, int>, std::list<MyPacket>> packets; 
   bool toggle;

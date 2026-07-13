@@ -279,6 +279,7 @@ namespace MockNccl {
   }
   
   std::shared_ptr<void> MockNcclGroup::getFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size,int layer_num,State loopstate){
+    std::lock_guard<std::mutex> lock(flow_models_mutex);
     std::string flow_model_name;
     GroupInfo gp_info;
     int gp_idx;
@@ -1714,6 +1715,53 @@ namespace MockNccl {
     for(auto it = rank2flowmodels.begin();it!=rank2flowmodels.end();it++){
       rank2pflowmodels[it->first] = std::make_shared<FlowModels>(it->second);
     }
+#ifdef NS3_MTP
+    size_t invalid_links = 0;
+    for (const auto& entry : result) {
+      const auto& flow = entry.second;
+      for (size_t i = 0; i < flow.parent_flow_id.size(); ++i) {
+        auto parent = result.find(
+            std::make_pair(entry.first.first, flow.parent_flow_id[i]));
+        bool valid = parent != result.end() &&
+            i < flow.prev.size() &&
+            parent->second.src == flow.prev[i] &&
+            parent->second.dest == flow.src &&
+            parent->second.chunk_id + 1 == flow.chunk_id;
+        if (!valid) {
+          if (invalid_links < 16) {
+            std::cerr << "[NS3 flow map invalid] ring=" << entry.first.first
+                      << " flow=" << flow.flow_id
+                      << " edge=" << flow.src << "->" << flow.dest
+                      << " chunk=" << flow.chunk_id
+                      << " parent=" << flow.parent_flow_id[i]
+                      << " prev=" << (i < flow.prev.size() ? flow.prev[i] : -1)
+                      << std::endl;
+          }
+          ++invalid_links;
+        }
+      }
+      for (int child_id : flow.child_flow_id) {
+        auto child = result.find(std::make_pair(entry.first.first, child_id));
+        bool reciprocal = child != result.end() &&
+            std::find(child->second.parent_flow_id.begin(),
+                      child->second.parent_flow_id.end(), flow.flow_id) !=
+                child->second.parent_flow_id.end();
+        if (!reciprocal) {
+          if (invalid_links < 16) {
+            std::cerr << "[NS3 flow map invalid child] ring="
+                      << entry.first.first << " flow=" << flow.flow_id
+                      << " child=" << child_id << std::endl;
+          }
+          ++invalid_links;
+        }
+      }
+    }
+    if (invalid_links != 0) {
+      std::cerr << "[NS3 flow map invalid] total=" << invalid_links
+                << " rank=" << rank << " data_size=" << data_size
+                << std::endl;
+    }
+#endif
     return rank2pflowmodels;
   }
   
