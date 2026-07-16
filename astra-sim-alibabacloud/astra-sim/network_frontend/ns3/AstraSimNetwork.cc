@@ -29,6 +29,7 @@
 #include <iostream>
 #include <queue>
 #include <cstdlib>
+#include <atomic>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -75,6 +76,15 @@ public:
   ~ASTRASimNetwork() {}
   int sim_comm_size(AstraSim::sim_comm comm, int *size) { return 0; }
   int sim_finish() {
+    static std::atomic<bool> finalized{false};
+    if (!finalized.exchange(true)) {
+      ns3_print_pxn_summary();
+      ns3_print_routing_summary();
+      const char* route_choice_file = std::getenv("AS_NS3_ROUTE_CHOICE_FILE");
+      if (route_choice_file != nullptr && route_choice_file[0] != '\0') {
+        SwitchNode::DumpRouteChoiceStats(route_choice_file);
+      }
+    }
     for (auto it = nodeHash.begin(); it != nodeHash.end(); it++) {
       pair<int, int> p = it->first;
       if (p.second == 0) {
@@ -399,6 +409,11 @@ int main(int argc, char *argv[]) {
 
   Simulator::Destroy();
   ns3_print_pxn_summary();
+  ns3_print_routing_summary();
+  const char* route_choice_file = std::getenv("AS_NS3_ROUTE_CHOICE_FILE");
+  if (route_choice_file != nullptr && route_choice_file[0] != '\0') {
+    SwitchNode::DumpRouteChoiceStats(route_choice_file);
+  }
   
   #ifdef NS3_MPI
   MpiInterface::Disable ();
