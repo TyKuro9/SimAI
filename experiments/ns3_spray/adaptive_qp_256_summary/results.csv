@@ -4,5 +4,9 @@ allgather_64MiB,06f03a1ece989d9f83b05aaf2d3418d4909a0cce01bf28661764b8387d1bbe4f
 allgather_64MiB,06f03a1ece989d9f83b05aaf2d3418d4909a0cce01bf28661764b8387d1bbe4f,DeepSeek,spray_adaptive,1233.759,35.012,3584,0,3584,success
 dense_GA1,72483d2b6d84dcfec24194ec383b02a03804e4cef5560ca5d480ee17619d32c8,Zcube,spray_adaptive,310348.236,2120.877,,,,success
 dense_GA1,72483d2b6d84dcfec24194ec383b02a03804e4cef5560ca5d480ee17619d32c8,DeepSeek,spray_adaptive,314678.283,2270.309,,,,success
+dense_GA12,29e8082dced64cdabea6e9da8e9506acc02e00898f485142216dbcb769ed746b,ROFT,spray_adaptive,2118948.317,8327.710,,,,success
 dense_GA12,29e8082dced64cdabea6e9da8e9506acc02e00898f485142216dbcb769ed746b,Zcube,spray_adaptive,2119411.632,7223.438,,,,success
 dense_GA12,29e8082dced64cdabea6e9da8e9506acc02e00898f485142216dbcb769ed746b,DeepSeek,spray_adaptive,2124044.494,7146.801,,,,success
+dense_GA12,29e8082dced64cdabea6e9da8e9506acc02e00898f485142216dbcb769ed746b,Meta,spray_adaptive,2141931.794,8691.190,,,,success
+dense_GA12,29e8082dced64cdabea6e9da8e9506acc02e00898f485142216dbcb769ed746b,HPN,spray_adaptive,2151332.432,7787.688,,,,success
+dense_GA12,29e8082dced64cdabea6e9da8e9506acc02e00898f485142216dbcb769ed746b,RO,spray_adaptive,2424428.772,8512.529,,,,success
