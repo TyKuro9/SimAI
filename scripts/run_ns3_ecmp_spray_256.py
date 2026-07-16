@@ -24,6 +24,8 @@ TOPOLOGIES = {
     "DeepSeek": ROOT / "mytopo" / "DeepSeek_256g_8gps_p16a0.5_400Gbps_H800",
     "HPN": ROOT / "mytopo" / "AlibabaHPN_256g_8gps_DualToR_DualPlane_200Gbps_H100",
     "ROFT": ROOT / "mytopo" / "ROFT_256g_8gps_p16a0.5_400Gbps_H100",
+    "Meta": ROOT / "mytopo" / "Meta_Topo_256g_8gps_400Gbps_A100",
+    "RO": ROOT / "mytopo" / "RailOnly_256g_8gps_p16a0.5_400Gbps_H100",
 }
 
 DEFAULT_WORKLOAD = (
