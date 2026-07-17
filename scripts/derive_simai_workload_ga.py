@@ -10,6 +10,7 @@ from typing import Optional, Sequence
 
 
 GA_RE = re.compile(r"\bga:\s*(\d+)\b")
+WORLD_SIZE_RE = re.compile(r"\ball_gpus:\s*(\d+)\b")
 
 
 def record_name(record: str) -> str:
@@ -21,6 +22,7 @@ def derive_workload(
     destination: Path,
     target_ga: int,
     block_marker: str,
+    target_world_size: Optional[int] = None,
 ) -> tuple[int, int, int]:
     lines = source.read_text().splitlines()
     if len(lines) < 3:
@@ -70,6 +72,14 @@ def derive_workload(
     ]
     output_records = prefix + selected_blocks + suffix
     output_header = GA_RE.sub(f"ga: {target_ga}", lines[0], count=1)
+    if target_world_size is not None:
+        if target_world_size < 1:
+            raise ValueError("target world size must be positive")
+        if WORLD_SIZE_RE.search(output_header) is None:
+            raise ValueError(f"{source} header has no all_gpus field")
+        output_header = WORLD_SIZE_RE.sub(
+            f"all_gpus: {target_world_size}", output_header, count=1
+        )
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
@@ -83,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--target-ga", type=int, required=True)
+    parser.add_argument("--target-world-size", type=int)
     parser.add_argument("--block-marker", default="embedding_layer")
     return parser
 
@@ -94,6 +105,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.destination.resolve(),
         args.target_ga,
         args.block_marker,
+        args.target_world_size,
     )
     print(
         f"generated {args.destination}: GA {source_ga} -> {args.target_ga}, "

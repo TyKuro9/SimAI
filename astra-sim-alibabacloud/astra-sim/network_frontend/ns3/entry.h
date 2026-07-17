@@ -173,6 +173,37 @@ bool ns3_completion_log_enabled() {
   return enabled;
 }
 
+uint64_t ns3_env_u64(const char* name, uint64_t fallback) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || value[0] == '\0') {
+    return fallback;
+  }
+  try {
+    return std::stoull(value);
+  } catch (const std::exception&) {
+    return fallback;
+  }
+}
+
+bool ns3_should_log_fct(const AstraSim::ncclFlowTag& flow_tag) {
+  static const std::string filter = []() {
+    const char* value = std::getenv("AS_NS3_FCT_FILTER");
+    return value == nullptr ? std::string() : std::string(value);
+  }();
+  if (filter != "dp") {
+    return true;
+  }
+  static const uint64_t dp_group_count =
+      ns3_env_u64("AS_NS3_DP_GROUP_COUNT", 0);
+  if (dp_group_count == 0 || flow_tag.sender_node < 0 ||
+      flow_tag.receiver_node < 0 ||
+      flow_tag.sender_node == flow_tag.receiver_node) {
+    return false;
+  }
+  return static_cast<uint64_t>(flow_tag.sender_node) % dp_group_count ==
+      static_cast<uint64_t>(flow_tag.receiver_node) % dp_group_count;
+}
+
 const char* ns3_routing_policy_name(AstraSim::Ns3RoutingPolicy policy) {
   switch (policy) {
     case AstraSim::Ns3RoutingPolicy::Spray:
@@ -878,7 +909,7 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
       has_pxn_ctx = true;
       pxn_leg_context.erase(flow_key);
     }
-    if (ns3_completion_log_enabled()) {
+    if (ns3_completion_log_enabled() && ns3_should_log_fct(flowTag)) {
       PxnLogFields log_fields =
           build_pxn_log_fields(sid, did, flowTag, has_pxn_ctx, pxn_ctx);
       fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu %d %d %s %zu %zu %d\n",
@@ -955,7 +986,7 @@ void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
       pxn_ctx = pxn_leg_context[flow_key];
       has_pxn_ctx = true;
     }
-    if (ns3_completion_log_enabled()) {
+    if (ns3_completion_log_enabled() && ns3_should_log_fct(flowTag)) {
       PxnLogFields log_fields =
           build_pxn_log_fields(sid, did, flowTag, has_pxn_ctx, pxn_ctx);
       fprintf(fout, "%08x %08x %u %u %lu %lu %lu %d %d %s %zu %zu %d\n",

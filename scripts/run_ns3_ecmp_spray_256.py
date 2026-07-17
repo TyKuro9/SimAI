@@ -565,11 +565,13 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
 
 
 def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[str, object]:
+    jct_only = bool(getattr(args, "jct_only", False))
+    fct_only = bool(getattr(args, "fct_only", False))
     run_dir = args.output_dir / topology_name / policy
     config = write_config(
-        run_dir, Path("/dev/null") if args.jct_only else None
+        run_dir, Path("/dev/null") if jct_only else None
     )
-    if args.jct_only or args.fct_only:
+    if jct_only or fct_only:
         (run_dir / "send.txt").symlink_to("/dev/null")
     route_choice_file = run_dir / "route_choices.csv"
     env = os.environ.copy()
@@ -584,17 +586,18 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
             "AS_NS3_FLOWLET_GAP_NS": str(args.flowlet_gap_ns),
             "AS_NS3_FLOWLET_BYTES": str(args.flowlet_bytes),
             "AS_NS3_FLOWLET_HYSTERESIS_NS": str(args.flowlet_hysteresis_ns),
-            "AS_NS3_COMPLETION_LOG": "0" if args.jct_only else "1",
-            "AS_FCT_OUTPUT": "0" if args.jct_only else "1",
+            "AS_NS3_COMPLETION_LOG": "0" if jct_only else "1",
+            "AS_FCT_OUTPUT": "0" if jct_only else "1",
         }
     )
+    env.update(getattr(args, "extra_env", {}))
     for variable in (
         "AS_NS3_SUBFLOW_OUTPUT_FILE",
         "AS_NS3_ROUTE_CHOICE_FILE",
         "AS_NS3_ROUTE_CHOICE_DUMP_INTERVAL_MS",
     ):
         env.pop(variable, None)
-    if not args.jct_only and not args.fct_only:
+    if not jct_only and not fct_only:
         env.update(
             {
                 "AS_NS3_SUBFLOW_OUTPUT_FILE": str(run_dir / "spray_subflows.csv"),
@@ -643,7 +646,7 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
                 log.write(f"\n[RUNNER] EndToEnd.csv complete with JCT={current_jct}\n")
                 log.flush()
             if (
-                args.jct_only
+                jct_only
                 and saw_jct
                 and jct_seen_at is not None
                 and now - jct_seen_at >= args.route_dump_grace_seconds
@@ -661,7 +664,7 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
                 # runner deliberately stops NS3 before its optional teardown.
                 return_code = 0
                 break
-            if args.fct_only and saw_jct:
+            if fct_only and saw_jct:
                 fct_path = run_dir / "fct.txt"
                 if fct_path.exists() and fct_path.stat().st_size > 0:
                     stat = fct_path.stat()
@@ -721,8 +724,8 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
                     proc.wait(timeout=10)
                 break
             if (
-                not args.jct_only
-                and not args.fct_only
+                not jct_only
+                and not fct_only
                 and saw_jct
                 and jct_seen_at is not None
                 and now - jct_seen_at
@@ -746,10 +749,14 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
     if status == "success" and jct is None:
         status = "missing_jct"
 
-    analysis = {} if args.jct_only else summarize_run(run_dir)
+    analysis = (
+        {}
+        if jct_only or bool(getattr(args, "skip_analysis", False))
+        else summarize_run(run_dir)
+    )
     if (
-        not args.jct_only
-        and not args.fct_only
+        not jct_only
+        and not fct_only
         and status == "success"
         and int(analysis.get("route_qps") or 0) == 0
     ):
