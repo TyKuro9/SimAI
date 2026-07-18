@@ -64,6 +64,7 @@ POLICIES = [
     "spray_flowlet",
     "spray_dual_table",
     "spray_adaptive",
+    "spray_dynamic_chunk",
 ]
 DEFAULT_OUTPUT = (
     ROOT / "experiments" / "ns3_spray" / "adaptive_1024_dense_ga6_20260717"
@@ -258,6 +259,7 @@ def run_case(
         workload=WORKLOADS[workload_kind],
         output_dir=args.output_dir / workload_kind,
         spray_width=args.spray_width,
+        dynamic_chunks=args.dynamic_chunks,
         flowlet_gap_ns=args.flowlet_gap_ns,
         flowlet_bytes=args.flowlet_bytes,
         flowlet_hysteresis_ns=args.flowlet_hysteresis_ns,
@@ -390,6 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--policies", nargs="+", choices=POLICIES, default=["spray_adaptive"]
     )
     parser.add_argument("--spray-width", type=int, default=4)
+    parser.add_argument("--dynamic-chunks", type=int, default=8)
     parser.add_argument("--flowlet-gap-ns", type=int, default=5000)
     parser.add_argument("--flowlet-bytes", type=int, default=0)
     parser.add_argument("--flowlet-hysteresis-ns", type=int, default=500)
@@ -424,6 +427,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit(f"missing binary: {args.binary}")
     if not 1 <= args.spray_width <= 16:
         raise SystemExit("--spray-width must be between 1 and 16")
+    if not 1 <= args.dynamic_chunks <= 64:
+        raise SystemExit("--dynamic-chunks must be between 1 and 64")
     if (
         args.threads < 1
         or args.parallel_runs < 1
@@ -488,6 +493,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         },
         "policies": args.policies,
         "spray_width": args.spray_width,
+        "dynamic_chunks": args.dynamic_chunks,
         "flowlet_gap_ns": args.flowlet_gap_ns,
         "flowlet_bytes": args.flowlet_bytes,
         "flowlet_hysteresis_ns": args.flowlet_hysteresis_ns,

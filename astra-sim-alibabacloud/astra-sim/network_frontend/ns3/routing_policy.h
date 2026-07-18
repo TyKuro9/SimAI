@@ -18,6 +18,7 @@ enum class Ns3RoutingPolicy {
   SprayFlowlet,
   SprayDualTable,
   SprayAdaptive,
+  SprayDynamicChunk,
 };
 
 inline std::string NormalizeNs3RoutingValue(const char* value) {
@@ -61,10 +62,16 @@ inline Ns3RoutingPolicy ParseNs3RoutingPolicy(const char* value) {
       normalized == "zcube_adaptive" || normalized == "eta_spray") {
     return Ns3RoutingPolicy::SprayAdaptive;
   }
+  if (normalized == "spray_dynamic_chunk" ||
+      normalized == "dynamic_chunk_spray" ||
+      normalized == "chunk_spray" || normalized == "chunk_adaptive") {
+    return Ns3RoutingPolicy::SprayDynamicChunk;
+  }
   throw std::invalid_argument(
       "expected ecmp, spray/qp_spray, spray_dynamic/qp_dynamic, or "
       "spray_path/qp_path, spray_flowlet/dynamic_flowlet, or "
-      "spray_dual_table/dual_table_flowlet, or spray_adaptive/eta_spray");
+      "spray_dual_table/dual_table_flowlet, spray_adaptive/eta_spray, or "
+      "spray_dynamic_chunk/chunk_spray");
 }
 
 inline bool IsNs3SprayPolicy(Ns3RoutingPolicy policy) {
@@ -73,7 +80,12 @@ inline bool IsNs3SprayPolicy(Ns3RoutingPolicy policy) {
          policy == Ns3RoutingPolicy::SprayPathAware ||
          policy == Ns3RoutingPolicy::SprayFlowlet ||
          policy == Ns3RoutingPolicy::SprayDualTable ||
-         policy == Ns3RoutingPolicy::SprayAdaptive;
+         policy == Ns3RoutingPolicy::SprayAdaptive ||
+         policy == Ns3RoutingPolicy::SprayDynamicChunk;
+}
+
+inline bool IsNs3DynamicChunkPolicy(Ns3RoutingPolicy policy) {
+  return policy == Ns3RoutingPolicy::SprayDynamicChunk;
 }
 
 inline uint32_t ParseNs3SprayWidth(const char* value) {
@@ -115,6 +127,27 @@ inline std::vector<uint64_t> SplitNs3SprayBytes(
     ++stripes[index];
   }
   return stripes;
+}
+
+inline uint32_t ParseNs3DynamicChunkCount(const char* value) {
+  const std::string normalized = NormalizeNs3RoutingValue(value);
+  if (normalized.empty()) {
+    return 8;
+  }
+
+  size_t consumed = 0;
+  unsigned long parsed = 0;
+  try {
+    parsed = std::stoul(normalized, &consumed, 10);
+  } catch (const std::exception&) {
+    throw std::invalid_argument(
+        "dynamic chunk count must be an integer from 1 to 64");
+  }
+  if (consumed != normalized.size() || parsed < 1 || parsed > 64) {
+    throw std::invalid_argument(
+        "dynamic chunk count must be an integer from 1 to 64");
+  }
+  return static_cast<uint32_t>(parsed);
 }
 
 }  // namespace AstraSim

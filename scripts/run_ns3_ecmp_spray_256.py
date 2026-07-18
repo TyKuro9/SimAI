@@ -128,6 +128,8 @@ def write_config(
         "run.log",
         "send.txt",
         "spray_subflows.csv",
+        "stripe_metrics.csv",
+        "stripe_flow_metrics.csv",
     ):
         stale_path = run_dir / stale_name
         if stale_path.exists():
@@ -583,6 +585,9 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
             "AS_PXN_POLICY": "off",
             "AS_NS3_ROUTING_POLICY": policy,
             "AS_NS3_SPRAY_WIDTH": str(args.spray_width),
+            "AS_NS3_DYNAMIC_CHUNKS": str(
+                getattr(args, "dynamic_chunks", 8)
+            ),
             "AS_NS3_FLOWLET_GAP_NS": str(args.flowlet_gap_ns),
             "AS_NS3_FLOWLET_BYTES": str(args.flowlet_bytes),
             "AS_NS3_FLOWLET_HYSTERESIS_NS": str(args.flowlet_hysteresis_ns),
@@ -595,8 +600,13 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
         "AS_NS3_SUBFLOW_OUTPUT_FILE",
         "AS_NS3_ROUTE_CHOICE_FILE",
         "AS_NS3_ROUTE_CHOICE_DUMP_INTERVAL_MS",
+        "AS_NS3_STRIPE_METRICS_FILE",
     ):
         env.pop(variable, None)
+    if not jct_only:
+        env["AS_NS3_STRIPE_METRICS_FILE"] = str(
+            run_dir / "stripe_metrics.csv"
+        )
     if not jct_only and not fct_only:
         env.update(
             {
@@ -765,6 +775,7 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
         "topology": topology_name,
         "policy": policy,
         "spray_width": args.spray_width,
+        "dynamic_chunks": getattr(args, "dynamic_chunks", 8),
         "configured_flowlet_gap_ns": args.flowlet_gap_ns,
         "configured_flowlet_bytes": args.flowlet_bytes,
         "configured_flowlet_hysteresis_ns": args.flowlet_hysteresis_ns,
@@ -870,6 +881,7 @@ def build_parser() -> argparse.ArgumentParser:
             "spray_flowlet",
             "spray_dual_table",
             "spray_adaptive",
+            "spray_dynamic_chunk",
         ],
         default=[
             "ecmp",
@@ -880,6 +892,12 @@ def build_parser() -> argparse.ArgumentParser:
         ],
     )
     parser.add_argument("--spray-width", type=int, default=4)
+    parser.add_argument(
+        "--dynamic-chunks",
+        type=int,
+        default=8,
+        help="total chunks per logical flow for spray_dynamic_chunk",
+    )
     parser.add_argument("--flowlet-gap-ns", type=int, default=5000)
     parser.add_argument(
         "--flowlet-bytes",
@@ -920,6 +938,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args.output_dir = args.output_dir.resolve()
     if not 1 <= args.spray_width <= 16:
         raise SystemExit("--spray-width must be between 1 and 16")
+    if not 1 <= args.dynamic_chunks <= 64:
+        raise SystemExit("--dynamic-chunks must be between 1 and 64")
     if (
         args.threads < 1
         or args.timeout < 1

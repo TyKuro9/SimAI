@@ -105,7 +105,44 @@ struct PxnLegContext {
   size_t next_leg_index;
 };
 
+struct Ns3PhysicalFlowSpec {
+  int src;
+  int dst;
+  uint64_t logical_bytes;
+  void *fun_arg;
+  void (*msg_handler)(void *fun_arg);
+  int tag;
+  AstraSim::sim_request request;
+  PxnLegKind leg_kind;
+  int original_src;
+  int original_dst;
+  std::vector<std::pair<int, int>> pxn_legs;
+  size_t next_leg_index;
+};
+
+struct Ns3DynamicChunkPlan {
+  Ns3PhysicalFlowSpec flow;
+  std::vector<uint64_t> chunk_bytes;
+  size_t concurrency = 1;
+  size_t send_finished = 0;
+  size_t receive_finished = 0;
+};
+
+struct Ns3SubflowContext {
+  size_t stripe_index = 0;
+  size_t stripe_count = 1;
+  uint64_t dynamic_plan_id = 0;
+  bool send_finished = false;
+  bool receive_finished = false;
+};
+
 map<std::pair<int, std::pair<int, int>>, PxnLegContext> pxn_leg_context;
+map<std::pair<int, std::pair<int, int>>, Ns3SubflowContext>
+    ns3_subflow_context;
+std::mutex ns3_subflow_context_mutex;
+std::map<uint64_t, Ns3DynamicChunkPlan> ns3_dynamic_chunk_plans;
+std::mutex ns3_dynamic_chunk_mutex;
+std::atomic<uint64_t> ns3_next_dynamic_plan_id{1};
 uint64_t ns3_pxn_split_count = 0;
 uint64_t ns3_pxn_direct_cross_rail_count = 0;
 std::atomic<uint64_t> ns3_routing_fabric_leg_count{0};
@@ -165,6 +202,25 @@ uint32_t ns3_spray_width() {
   return width;
 }
 
+uint32_t ns3_dynamic_chunk_count() {
+  static uint32_t count = []() {
+    const char* value = std::getenv("AS_NS3_DYNAMIC_CHUNKS");
+    if (value == nullptr || value[0] == '\0') {
+      value = std::getenv("NS3_DYNAMIC_CHUNKS");
+    }
+    try {
+      return AstraSim::ParseNs3DynamicChunkCount(value);
+    } catch (const std::invalid_argument& error) {
+      MockNcclLog::getInstance()->writeLog(
+          NcclLogLevel::ERROR,
+          "Invalid AS_NS3_DYNAMIC_CHUNKS=%s: %s",
+          value ? value : "", error.what());
+      std::exit(-1);
+    }
+  }();
+  return count;
+}
+
 bool ns3_completion_log_enabled() {
   static bool enabled = []() {
     const char* value = std::getenv("AS_NS3_COMPLETION_LOG");
@@ -218,6 +274,8 @@ const char* ns3_routing_policy_name(AstraSim::Ns3RoutingPolicy policy) {
       return "spray_dual_table";
     case AstraSim::Ns3RoutingPolicy::SprayAdaptive:
       return "spray_adaptive";
+    case AstraSim::Ns3RoutingPolicy::SprayDynamicChunk:
+      return "spray_dynamic_chunk";
     case AstraSim::Ns3RoutingPolicy::Ecmp:
       return "ecmp";
   }
@@ -250,6 +308,138 @@ FILE* ns3_subflow_output() {
     return file;
   }();
   return output;
+}
+
+FILE* ns3_stripe_metrics_output() {
+  static FILE* output = []() -> FILE* {
+    const char* path = std::getenv("AS_NS3_STRIPE_METRICS_FILE");
+    if (path == nullptr || path[0] == '\0') {
+      return nullptr;
+    }
+    FILE* file = fopen(path, "w");
+    if (file == nullptr) {
+      perror("AS_NS3_STRIPE_METRICS_FILE");
+      std::exit(-1);
+    }
+    fprintf(
+        file,
+        "orig_src,orig_dst,physical_src,physical_dst,flow_id,tag_id,"
+        "channel_id,sport,dport,bytes,stripe_index,stripe_count,"
+        "dynamic_chunk,source_nic,initial_source_nic,destination_nic,"
+        "source_nic_ordinal_hint,source_nic_hint_fallback,"
+        "nic_reassignments,path_signature,path_hops,candidate_count,"
+        "path_score_ns,path_queue_delay_ns,path_propagation_ns,"
+        "path_reserved_bytes,cnp_count,start_ns,finish_ns,fct_ns,"
+        "standalone_fct_ns\n");
+    fflush(file);
+    return file;
+  }();
+  return output;
+}
+
+void ns3_register_subflow_context(
+    const std::pair<int, std::pair<int, int>>& flow_key,
+    const Ns3SubflowContext& context) {
+  std::lock_guard<std::mutex> guard(ns3_subflow_context_mutex);
+  ns3_subflow_context[flow_key] = context;
+}
+
+bool ns3_lookup_subflow_context(
+    const std::pair<int, std::pair<int, int>>& flow_key,
+    Ns3SubflowContext* context) {
+  std::lock_guard<std::mutex> guard(ns3_subflow_context_mutex);
+  auto found = ns3_subflow_context.find(flow_key);
+  if (found == ns3_subflow_context.end()) {
+    return false;
+  }
+  if (context != nullptr) {
+    *context = found->second;
+  }
+  return true;
+}
+
+bool ns3_mark_subflow_send_finished(
+    const std::pair<int, std::pair<int, int>>& flow_key,
+    Ns3SubflowContext* context) {
+  std::lock_guard<std::mutex> guard(ns3_subflow_context_mutex);
+  auto found = ns3_subflow_context.find(flow_key);
+  if (found == ns3_subflow_context.end()) {
+    return false;
+  }
+  if (context != nullptr) {
+    *context = found->second;
+  }
+  if (found->second.send_finished) {
+    return false;
+  }
+  found->second.send_finished = true;
+  return true;
+}
+
+void ns3_mark_subflow_receive_finished(
+    const std::pair<int, std::pair<int, int>>& flow_key) {
+  std::lock_guard<std::mutex> guard(ns3_subflow_context_mutex);
+  auto found = ns3_subflow_context.find(flow_key);
+  if (found == ns3_subflow_context.end()) {
+    return;
+  }
+  found->second.receive_finished = true;
+  if (found->second.send_finished) {
+    ns3_subflow_context.erase(found);
+  }
+}
+
+void ns3_write_stripe_metric(
+    Ptr<RdmaQueuePair> q,
+    uint32_t physical_src,
+    uint32_t physical_dst,
+    const AstraSim::ncclFlowTag& flow_tag,
+    const PxnLogFields& log_fields,
+    const Ns3SubflowContext& subflow,
+    uint64_t standalone_fct) {
+  FILE* output = ns3_stripe_metrics_output();
+  if (output == nullptr) {
+    return;
+  }
+  const uint64_t finish_ns = Simulator::Now().GetTimeStep();
+  const uint64_t start_ns = q->startTime.GetTimeStep();
+  const uint64_t fct_ns = (Simulator::Now() - q->startTime).GetTimeStep();
+  fprintf(
+      output,
+      "%d,%d,%u,%u,%d,%d,%d,%u,%u,%lu,%zu,%zu,%u,%d,%d,%d,%u,%u,%lu,"
+      "%016lx,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
+      log_fields.original_src,
+      log_fields.original_dst,
+      physical_src,
+      physical_dst,
+      log_fields.flow_id,
+      flow_tag.tag_id,
+      flow_tag.channel_id,
+      q->sport,
+      q->dport,
+      q->m_size,
+      subflow.stripe_index,
+      subflow.stripe_count,
+      subflow.dynamic_plan_id == 0 ? 0U : 1U,
+      q->m_selectedNicIdx,
+      q->m_initialSelectedNicIdx,
+      q->m_selectedDestinationNicIdx,
+      q->m_sourceNicOrdinalHint,
+      q->m_sourceNicHintFallback ? 1U : 0U,
+      q->m_nicReassignments,
+      q->m_bindPathSignature,
+      q->m_bindPathHops,
+      q->m_bindCandidateCount,
+      q->m_bindPathScoreNs,
+      q->m_bindPathQueueDelayNs,
+      q->m_bindPathPropagationNs,
+      q->m_bindPathReservedBytes,
+      q->m_cnpCount,
+      start_ns,
+      finish_ns,
+      fct_ns,
+      standalone_fct);
+  fflush(output);
 }
 
 void ns3_write_subflow_record(
@@ -513,9 +703,19 @@ void ns3_print_routing_summary() {
   if (subflow_output != nullptr) {
     fflush(subflow_output);
   }
+  FILE* stripe_metrics_output = ns3_stripe_metrics_output();
+  if (stripe_metrics_output != nullptr) {
+    fflush(stripe_metrics_output);
+  }
+  size_t pending_dynamic_plans = 0;
+  {
+    std::lock_guard<std::mutex> guard(ns3_dynamic_chunk_mutex);
+    pending_dynamic_plans = ns3_dynamic_chunk_plans.size();
+  }
   std::cout << "[NS3 ROUTING SUMMARY] policy="
             << ns3_routing_policy_name(ns3_routing_policy())
             << " width=" << ns3_spray_width()
+            << " dynamic_chunks=" << ns3_dynamic_chunk_count()
             << " fabric_legs="
             << ns3_routing_fabric_leg_count.load(std::memory_order_relaxed)
             << " sprayed_legs="
@@ -525,6 +725,7 @@ void ns3_print_routing_summary() {
             << " fabric_bytes="
             << ns3_routing_fabric_bytes.load(std::memory_order_relaxed)
             << " pending_contexts=" << pxn_leg_context.size()
+            << " pending_dynamic_plans=" << pending_dynamic_plans
             << " pending_send_callbacks=" << waiting_to_sent_callback.size()
             << " pending_recv_callbacks=" << waiting_to_notify_receiver.size()
             << std::endl;
@@ -598,18 +799,219 @@ bool is_receive_finished(int src,int dst,AstraSim::ncclFlowTag flowTag){
   return false;
 }
 
+void ns3_launch_physical_subflow(
+    const Ns3PhysicalFlowSpec& flow,
+    uint64_t bytes,
+    size_t stripe_index,
+    size_t stripe_count,
+    uint64_t dynamic_plan_id) {
+  MockNcclLog* nccl_log = MockNcclLog::getInstance();
+  uint64_t packet_count = bytes == 0 ? 1 : bytes;
+  uint32_t port;
+  {
+    #ifdef NS3_MTP
+    MtpInterface::explicitCriticalSection cs;
+    #endif
+    port = portNumber[flow.src][flow.dst]++;
+    const auto flow_key = make_pair(port, make_pair(flow.src, flow.dst));
+    sender_src_port_map[flow_key] = flow.request.flowTag;
+    ns3_register_subflow_context(
+        flow_key,
+        Ns3SubflowContext{
+            stripe_index, stripe_count, dynamic_plan_id, false, false});
+    PxnLegContext pxn_log_context{};
+    const bool has_pxn_context = flow.leg_kind != PxnLegKind::None;
+    if (has_pxn_context) {
+      PxnLegContext ctx;
+      ctx.kind = flow.leg_kind;
+      ctx.original_src = flow.original_src;
+      ctx.original_dst = flow.original_dst;
+      ctx.tag = flow.tag;
+      ctx.count = flow.logical_bytes;
+      ctx.fun_arg = flow.fun_arg;
+      ctx.msg_handler = flow.msg_handler;
+      ctx.request = flow.request;
+      ctx.legs = flow.pxn_legs;
+      ctx.next_leg_index = flow.next_leg_index;
+      pxn_leg_context[flow_key] = ctx;
+      pxn_log_context = ctx;
+    }
+    const PxnLogFields log_fields = build_pxn_log_fields(
+        flow.src,
+        flow.dst,
+        flow.request.flowTag,
+        has_pxn_context,
+        pxn_log_context);
+    ns3_write_subflow_record(
+        flow.src,
+        flow.dst,
+        port,
+        100,
+        packet_count,
+        flow.request.flowTag,
+        log_fields,
+        stripe_index,
+        stripe_count);
+    #ifdef NS3_MTP
+    cs.ExitSection();
+    #endif
+  }
+
+  int send_lat = 6000;
+  const char* send_lat_env = std::getenv("AS_SEND_LAT");
+  if (send_lat_env != nullptr) {
+    try {
+      send_lat = std::stoi(send_lat_env);
+    } catch (const std::invalid_argument&) {
+      nccl_log->writeLog(NcclLogLevel::ERROR, "send_lat set error");
+      exit(-1);
+    }
+  }
+  send_lat *= 1000;
+  flow_input.idx++;
+  nccl_log->writeLog(
+      NcclLogLevel::DEBUG,
+      "[Packet sending event] %d SendFlow to %d flow_id %d size %llu "
+      "stripe %zu/%zu dynamic_plan %llu at tick %d",
+      flow.src,
+      flow.dst,
+      flow.request.flowTag.current_flow_id,
+      packet_count,
+      stripe_index + 1,
+      stripe_count,
+      dynamic_plan_id,
+      AstraSim::Sys::boostedTick());
+
+  const int pg = 3;
+  const int dport = 100;
+  RdmaClientHelper client_helper(
+      pg,
+      serverAddress[flow.src],
+      serverAddress[flow.dst],
+      port,
+      dport,
+      packet_count,
+      has_win
+          ? (global_t == 1
+                 ? maxBdp
+                 : pairBdp[n.Get(flow.src)][n.Get(flow.dst)])
+          : 0,
+      global_t == 1 ? maxRtt : pairRtt[flow.src][flow.dst],
+      flow.msg_handler,
+      flow.fun_arg,
+      flow.tag,
+      flow.src,
+      flow.dst);
+  if (flow.request.flowTag.nvls_on) {
+    client_helper.SetAttribute("NVLS_enable", UintegerValue(1));
+  }
+  if (dynamic_plan_id != 0) {
+    client_helper.SetAttribute(
+        "SourceNicOrdinalHint",
+        UintegerValue(stripe_index % ns3_spray_width()));
+  }
+  {
+    #ifdef NS3_MTP
+    MtpInterface::explicitCriticalSection cs;
+    #endif
+    ApplicationContainer app_con = client_helper.Install(n.Get(flow.src));
+    app_con.Start(Time(send_lat));
+    if (flow.leg_kind != PxnLegKind::Local) {
+      const auto logical_key = std::make_pair(
+          flow.request.flowTag.current_flow_id,
+          std::make_pair(flow.original_src, flow.original_dst));
+      waiting_to_sent_callback[logical_key]++;
+      waiting_to_notify_receiver[logical_key]++;
+    }
+    #ifdef NS3_MTP
+    cs.ExitSection();
+    #endif
+  }
+}
+
+bool ns3_launch_dynamic_chunk(uint64_t plan_id, size_t stripe_index) {
+  Ns3PhysicalFlowSpec flow;
+  uint64_t bytes = 0;
+  size_t stripe_count = 0;
+  {
+    std::lock_guard<std::mutex> guard(ns3_dynamic_chunk_mutex);
+    auto found = ns3_dynamic_chunk_plans.find(plan_id);
+    if (found == ns3_dynamic_chunk_plans.end() ||
+        stripe_index >= found->second.chunk_bytes.size()) {
+      return false;
+    }
+    Ns3DynamicChunkPlan& plan = found->second;
+    stripe_count = plan.chunk_bytes.size();
+    bytes = plan.chunk_bytes[stripe_index];
+    flow = plan.flow;
+  }
+  ns3_launch_physical_subflow(
+      flow, bytes, stripe_index, stripe_count, plan_id);
+  return true;
+}
+
+void ns3_dynamic_chunk_send_finished(
+    uint64_t plan_id, size_t finished_stripe_index) {
+  if (plan_id == 0) {
+    return;
+  }
+  bool launch_next = false;
+  size_t next_stripe_index = 0;
+  {
+    std::lock_guard<std::mutex> guard(ns3_dynamic_chunk_mutex);
+    auto found = ns3_dynamic_chunk_plans.find(plan_id);
+    if (found == ns3_dynamic_chunk_plans.end()) {
+      return;
+    }
+    Ns3DynamicChunkPlan& plan = found->second;
+    ++plan.send_finished;
+    next_stripe_index = finished_stripe_index + plan.concurrency;
+    launch_next = next_stripe_index < plan.chunk_bytes.size();
+    if (!launch_next && plan.send_finished == plan.chunk_bytes.size() &&
+        plan.receive_finished == plan.chunk_bytes.size()) {
+      ns3_dynamic_chunk_plans.erase(found);
+      return;
+    }
+  }
+  if (launch_next) {
+    ns3_launch_dynamic_chunk(plan_id, next_stripe_index);
+  }
+}
+
+void ns3_dynamic_chunk_receive_finished(uint64_t plan_id) {
+  if (plan_id == 0) {
+    return;
+  }
+  std::lock_guard<std::mutex> guard(ns3_dynamic_chunk_mutex);
+  auto found = ns3_dynamic_chunk_plans.find(plan_id);
+  if (found == ns3_dynamic_chunk_plans.end()) {
+    return;
+  }
+  Ns3DynamicChunkPlan& plan = found->second;
+  ++plan.receive_finished;
+  if (plan.send_finished == plan.chunk_bytes.size() &&
+      plan.receive_finished == plan.chunk_bytes.size()) {
+    ns3_dynamic_chunk_plans.erase(found);
+  }
+}
+
 void SendFlowPhysical(int src, int dst, uint64_t maxPacketCount,
               void (*msg_handler)(void *fun_arg), void *fun_arg, int tag, AstraSim::sim_request *request,
               PxnLegKind leg_kind, int original_src, int original_dst,
               const std::vector<std::pair<int, int>>& pxn_legs = {},
               size_t next_leg_index = 0) {
-  MockNcclLog*NcclLog = MockNcclLog::getInstance();
   const bool uses_fabric = !ns3_is_same_server_transfer(src, dst);
+  const bool dynamic_chunk =
+      uses_fabric && leg_kind == PxnLegKind::None &&
+      AstraSim::IsNs3DynamicChunkPolicy(ns3_routing_policy());
   uint32_t stripe_count = 1;
   if (uses_fabric) {
     ns3_routing_fabric_leg_count.fetch_add(1, std::memory_order_relaxed);
     ns3_routing_fabric_bytes.fetch_add(maxPacketCount, std::memory_order_relaxed);
-    if (AstraSim::IsNs3SprayPolicy(ns3_routing_policy())) {
+    if (dynamic_chunk) {
+      stripe_count = AstraSim::EffectiveNs3SprayWidth(
+          maxPacketCount, ns3_dynamic_chunk_count());
+    } else if (AstraSim::IsNs3SprayPolicy(ns3_routing_policy())) {
       stripe_count =
           AstraSim::EffectiveNs3SprayWidth(maxPacketCount, ns3_spray_width());
     }
@@ -618,93 +1020,50 @@ void SendFlowPhysical(int src, int dst, uint64_t maxPacketCount,
       ns3_routing_sprayed_leg_count.fetch_add(1, std::memory_order_relaxed);
     }
   }
+
+  Ns3PhysicalFlowSpec flow{
+      src,
+      dst,
+      maxPacketCount,
+      fun_arg,
+      msg_handler,
+      tag,
+      *request,
+      leg_kind,
+      original_src,
+      original_dst,
+      pxn_legs,
+      next_leg_index};
   const std::vector<uint64_t> stripe_bytes =
       AstraSim::SplitNs3SprayBytes(maxPacketCount, stripe_count);
-  for(size_t index = 0; index < stripe_bytes.size(); index++){
-  uint64_t real_PacketCount = stripe_bytes[index];
-  uint32_t port;
+
+  if (dynamic_chunk) {
+    uint64_t plan_id = ns3_next_dynamic_plan_id.fetch_add(
+        1, std::memory_order_relaxed);
+    if (plan_id == 0) {
+      plan_id = ns3_next_dynamic_plan_id.fetch_add(
+          1, std::memory_order_relaxed);
+    }
     {
-      #ifdef NS3_MTP
-      MtpInterface::explicitCriticalSection cs;
-      #endif
-      port = portNumber[src][dst]++;
-      sender_src_port_map[make_pair(port, make_pair(src, dst))] = request->flowTag;
-      if (leg_kind != PxnLegKind::None) {
-        PxnLegContext ctx;
-        ctx.kind = leg_kind;
-        ctx.original_src = original_src;
-        ctx.original_dst = original_dst;
-        ctx.tag = tag;
-        ctx.count = maxPacketCount;
-        ctx.fun_arg = fun_arg;
-        ctx.msg_handler = msg_handler;
-        ctx.request = *request;
-        ctx.legs = pxn_legs;
-        ctx.next_leg_index = next_leg_index;
-        pxn_leg_context[make_pair(port, make_pair(src, dst))] = ctx;
-      }
-      PxnLogFields log_fields = build_pxn_log_fields(
-          src,
-          dst,
-          request->flowTag,
-          leg_kind != PxnLegKind::None,
-          leg_kind != PxnLegKind::None
-              ? pxn_leg_context[make_pair(port, make_pair(src, dst))]
-              : PxnLegContext{});
-      ns3_write_subflow_record(
-          src,
-          dst,
-          port,
-          100,
-          real_PacketCount,
-          request->flowTag,
-          log_fields,
-          index,
-          stripe_bytes.size());
-      #ifdef NS3_MTP
-      cs.ExitSection();
-      #endif
+      std::lock_guard<std::mutex> guard(ns3_dynamic_chunk_mutex);
+      Ns3DynamicChunkPlan plan;
+      plan.flow = flow;
+      plan.chunk_bytes = stripe_bytes;
+      plan.concurrency = std::min<size_t>(
+          stripe_bytes.size(), ns3_spray_width());
+      ns3_dynamic_chunk_plans.emplace(plan_id, std::move(plan));
     }
-  int flow_id = request->flowTag.current_flow_id;
-  bool nvls_on = request->flowTag.nvls_on;
-  int pg = 3, dport = 100;
-  int send_lat = 6000;
-  const char* send_lat_env = std::getenv("AS_SEND_LAT");
-  if (send_lat_env) {
-    try {
-      send_lat = std::stoi(send_lat_env);
-    } catch (const std::invalid_argument& e) {
-      NcclLog->writeLog(NcclLogLevel::ERROR,"send_lat set error");
-      exit(-1);
+    const size_t concurrency = std::min<size_t>(
+        stripe_bytes.size(), ns3_spray_width());
+    for (size_t index = 0; index < concurrency; ++index) {
+      ns3_launch_dynamic_chunk(plan_id, index);
     }
+    return;
   }
-  send_lat *= 1000;
-  flow_input.idx++;
-  if(real_PacketCount == 0) real_PacketCount = 1;
-    MockNcclLog* NcclLog = MockNcclLog::getInstance();
-    NcclLog->writeLog(NcclLogLevel::DEBUG," [Packet sending event]  %dSendFlow to  %d channelid:  %d flow_id  %d srcip  %d dstip  %d size:  %llu stripe: %zu/%zu at the tick:  %d",src,dst,tag,flow_id,serverAddress[src],serverAddress[dst],real_PacketCount,index + 1,stripe_bytes.size(),AstraSim::Sys::boostedTick());
-    NcclLog->writeLog(NcclLogLevel::DEBUG," request->flowTag [Packet sending event]  %dSendFlow to  %d tag_id:  %d flow_id  %d srcip  %d dstip  %d size:  %llu at the tick:  %d",request->flowTag.sender_node,request->flowTag.receiver_node,request->flowTag.tag_id,request->flowTag.current_flow_id,serverAddress[src],serverAddress[dst],maxPacketCount,AstraSim::Sys::boostedTick());
-  RdmaClientHelper clientHelper(
-      pg, serverAddress[src], serverAddress[dst], port, dport, real_PacketCount,
-      has_win ? (global_t == 1 ? maxBdp : pairBdp[n.Get(src)][n.Get(dst)]) : 0,
-      global_t == 1 ? maxRtt : pairRtt[src][dst], msg_handler, fun_arg, tag,
-      src, dst);
-  if(nvls_on) clientHelper.SetAttribute("NVLS_enable", UintegerValue (1));
-  {
-    #ifdef NS3_MTP
-    MtpInterface::explicitCriticalSection cs;
-    #endif
-    ApplicationContainer appCon = clientHelper.Install(n.Get(src));
-    appCon.Start(Time(send_lat));
-    if (leg_kind != PxnLegKind::Local) {
-      waiting_to_sent_callback[std::make_pair(request->flowTag.current_flow_id,std::make_pair(original_src,original_dst))]++;
-      waiting_to_notify_receiver[std::make_pair(request->flowTag.current_flow_id,std::make_pair(original_src,original_dst))]++;
-    }
-    #ifdef NS3_MTP
-    cs.ExitSection();
-    #endif
-  }
-  NcclLog->writeLog(NcclLogLevel::DEBUG,"waiting_to_notify_receiver  current_flow_id  %d src  %d dst  %d count  %d",request->flowTag.current_flow_id,original_src,original_dst,waiting_to_notify_receiver[std::make_pair(request->flowTag.current_flow_id,std::make_pair(original_src,original_dst))]);
+
+  for (size_t index = 0; index < stripe_bytes.size(); ++index) {
+    ns3_launch_physical_subflow(
+        flow, stripe_bytes[index], index, stripe_bytes.size(), 0);
   }
 }
 
@@ -897,6 +1256,9 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     MockNcclLog* NcclLog = MockNcclLog::getInstance();
     NcclLog->writeLog(NcclLogLevel::DEBUG,"qp finish, src:  %d did:  %d port:  %d total bytes:  %llu at the tick:  %d",sid,did,q->sport,q->m_size,AstraSim::Sys::boostedTick());
     auto flow_key = make_pair(q->sport, make_pair(sid, did));
+    Ns3SubflowContext subflow_context;
+    const bool has_subflow_context =
+        ns3_lookup_subflow_context(flow_key, &subflow_context);
     if (sender_src_port_map.find(flow_key) ==
         sender_src_port_map.end()) {
       NcclLog->writeLog(NcclLogLevel::ERROR,"could not find the tag, there must be something wrong");
@@ -909,9 +1271,9 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
       has_pxn_ctx = true;
       pxn_leg_context.erase(flow_key);
     }
+    const PxnLogFields log_fields =
+        build_pxn_log_fields(sid, did, flowTag, has_pxn_ctx, pxn_ctx);
     if (ns3_completion_log_enabled() && ns3_should_log_fct(flowTag)) {
-      PxnLogFields log_fields =
-          build_pxn_log_fields(sid, did, flowTag, has_pxn_ctx, pxn_ctx);
       fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu %d %d %s %zu %zu %d\n",
               q->sip.Get(), q->dip.Get(), q->sport, q->dport, q->m_size,
               q->startTime.GetTimeStep(),
@@ -920,6 +1282,20 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
               log_fields.leg_kind, log_fields.leg_index, log_fields.leg_count,
               log_fields.flow_id);
       fflush(fout);
+    }
+    if (has_subflow_context && ns3_should_log_fct(flowTag)) {
+      ns3_write_stripe_metric(
+          q,
+          sid,
+          did,
+          flowTag,
+          log_fields,
+          subflow_context,
+          standalone_fct);
+    }
+    if (has_subflow_context) {
+      ns3_dynamic_chunk_receive_finished(subflow_context.dynamic_plan_id);
+      ns3_mark_subflow_receive_finished(flow_key);
     }
     if (has_pxn_ctx && pxn_ctx.kind == PxnLegKind::Local) {
       if (pxn_ctx.next_leg_index >= pxn_ctx.legs.size()) {
@@ -964,6 +1340,18 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
 
 void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
   uint32_t sid = ip_to_node_id(q->sip), did = ip_to_node_id(q->dip);
+  const auto flow_key = make_pair(q->sport, make_pair(sid, did));
+  Ns3SubflowContext subflow_context;
+  if (ns3_mark_subflow_send_finished(flow_key, &subflow_context)) {
+    if (subflow_context.dynamic_plan_id != 0) {
+      Ptr<RdmaDriver> rdma = n.Get(sid)->GetObject<RdmaDriver>();
+      rdma->m_rdma->ReleasePathReservationBytes(q);
+    }
+    // Register a replacement before decrementing the logical callback count,
+    // so a staged plan cannot notify ASTRA-Sim between chunk waves.
+    ns3_dynamic_chunk_send_finished(
+        subflow_context.dynamic_plan_id, subflow_context.stripe_index);
+  }
   AstraSim::ncclFlowTag flowTag;
   int notify_src = sid;
   int notify_dst = did;
@@ -974,7 +1362,6 @@ void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     #ifdef NS3_MTP
     MtpInterface::explicitCriticalSection cs;
     #endif
-    auto flow_key = make_pair(q->sport, make_pair(sid, did));
     if (sender_src_port_map.find(flow_key) == sender_src_port_map.end()) {
       NcclLog->writeLog(NcclLogLevel::ERROR,"could not find the tag in send_finish");
       exit(-1);

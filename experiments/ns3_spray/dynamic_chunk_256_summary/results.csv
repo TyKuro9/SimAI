@@ -1,0 +1,6 @@
+variant,dynamic_chunks,lane_affinity,release_sent_reservation,jct_us,vs_adaptive_percent,flow_span_p50_ns,flow_span_p95_ns,source_nic_max_mean,path_change_ratio,links2_qps,links3_qps,links4_qps,status
+spray_adaptive,4,false,false,1231.741,0.00,172924,173160,1.0,,3584,0,3584,success
+dynamic_initial,16,false,false,1515.604,23.05,214338.5,230859.5,1.1964286,,16329,5,12338,success
+dynamic_canonical_lanes,16,true,false,1523.476,23.68,216020,250551.95,1.0,,14336,0,14336,success
+dynamic_canonical_lanes,8,true,false,1339.502,8.75,175798,241392.3,1.0,,7168,0,7168,success
+dynamic_canonical_lanes,8,true,true,1251.591,1.61,175715,175970,1.0,0.45256696,7168,0,7168,success

@@ -45,6 +45,15 @@ int main() {
       AstraSim::ParseNs3RoutingPolicy("ETA_SPRAY") ==
       Ns3RoutingPolicy::SprayAdaptive);
   assert(AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::SprayAdaptive));
+  assert(
+      AstraSim::ParseNs3RoutingPolicy("spray_dynamic_chunk") ==
+      Ns3RoutingPolicy::SprayDynamicChunk);
+  assert(
+      AstraSim::ParseNs3RoutingPolicy("CHUNK_SPRAY") ==
+      Ns3RoutingPolicy::SprayDynamicChunk);
+  assert(AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::SprayDynamicChunk));
+  assert(AstraSim::IsNs3DynamicChunkPolicy(
+      Ns3RoutingPolicy::SprayDynamicChunk));
   assert(!AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::Ecmp));
 
   assert(AstraSim::ParseNs3SprayWidth(nullptr) == 4);
@@ -53,6 +62,8 @@ int main() {
   assert(
       AstraSim::SplitNs3SprayBytes(10, 4) ==
       (std::vector<uint64_t>{3, 3, 2, 2}));
+  assert(AstraSim::ParseNs3DynamicChunkCount(nullptr) == 8);
+  assert(AstraSim::ParseNs3DynamicChunkCount("32") == 32);
 
   return 0;
 }
