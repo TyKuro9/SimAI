@@ -111,6 +111,17 @@ def jct(row: Optional[dict[str, str]]) -> Optional[float]:
     return value if math.isfinite(value) and value > 0.0 else None
 
 
+def result_status(row: Optional[dict[str, str]]) -> str:
+    if not row:
+        return "pending"
+    status = row.get("status", "")
+    if status == "success" and jct(row) is not None:
+        return "success"
+    if not status:
+        return "pending"
+    return f"{status}({row.get('return_code', 'unknown')})"
+
+
 def build_comparison(
     baseline_rows: list[dict[str, str]],
     dynamic_rows: list[dict[str, str]],
@@ -122,17 +133,27 @@ def build_comparison(
     dynamic = row_index(dynamic_rows, dynamic_policy)
     output: list[dict[str, object]] = []
     for workload, topology in expected_keys:
-        baseline_jct = jct(baseline.get((workload, topology)))
-        dynamic_jct = jct(dynamic.get((workload, topology)))
+        baseline_row = baseline.get((workload, topology))
+        dynamic_row = dynamic.get((workload, topology))
+        baseline_jct = jct(baseline_row)
+        dynamic_jct = jct(dynamic_row)
+        baseline_status = result_status(baseline_row)
+        dynamic_status = result_status(dynamic_row)
         complete = baseline_jct is not None and dynamic_jct is not None
+        failed = any(
+            status not in {"pending", "success"}
+            for status in (baseline_status, dynamic_status)
+        )
         row: dict[str, object] = {
             "workload_kind": workload,
             "topology": topology,
             "baseline_policy": baseline_policy,
             "dynamic_policy": dynamic_policy,
+            "baseline_status": baseline_status,
+            "dynamic_status": dynamic_status,
             "baseline_jct_us": baseline_jct if baseline_jct is not None else "pending",
             "dynamic_jct_us": dynamic_jct if dynamic_jct is not None else "pending",
-            "status": "complete" if complete else "pending",
+            "status": "complete" if complete else "failed" if failed else "pending",
             "delta_us": "pending",
             "delta_pct": "pending",
             "speedup_x": "pending",
@@ -192,8 +213,8 @@ def write_report(
         "",
         "Negative delta means `spray_dynamic_chunk` has lower JCT.",
         "",
-        "| Workload | Topology | Adaptive JCT (us) | Dynamic JCT (us) | Delta | Speedup | Winner |",
-        "|---|---|---:|---:|---:|---:|---|",
+        "| Workload | Topology | Adaptive status | Dynamic status | Adaptive JCT (us) | Dynamic JCT (us) | Delta | Speedup | Winner |",
+        "|---|---|---|---|---:|---:|---:|---:|---|",
     ]
     for row in rows:
         delta = row["delta_pct"]
@@ -206,6 +227,8 @@ def write_report(
                 [
                     str(row["workload_kind"]),
                     str(row["topology"]),
+                    str(row["baseline_status"]),
+                    str(row["dynamic_status"]),
                     number(row["baseline_jct_us"]),
                     number(row["dynamic_jct_us"]),
                     delta_text,

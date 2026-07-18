@@ -122,14 +122,18 @@ def matrix_rows(
             result = result_index.get(
                 (str(workload_name), str(topology), policy), {}
             )
-            complete = result.get("status") == "success"
+            result_status = str(result.get("status", ""))
+            complete = result_status == "success"
+            failed = bool(result_status) and not complete
             if complete:
                 progress = 1.0
-            draining = not complete and completed_events >= expected_events
+            draining = (
+                not complete and not failed and completed_events >= expected_events
+            )
             eta_seconds: object = "n/a"
             if complete:
                 eta_seconds = 0.0
-            elif not draining and progress > 0.0:
+            elif not failed and not draining and progress > 0.0:
                 eta_seconds = elapsed * (1.0 - progress) / progress
             log_age_seconds: object = "missing"
             if log_path.exists():
@@ -144,7 +148,13 @@ def matrix_rows(
                     "topology": topology,
                     "policy": policy,
                     "status": (
-                        "complete" if complete else "draining" if draining else "running"
+                        "complete"
+                        if complete
+                        else f"failed({result.get('return_code', 'unknown')})"
+                        if failed
+                        else "draining"
+                        if draining
+                        else "running"
                     ),
                     "completed_events": completed_events,
                     "expected_events": expected_events,
