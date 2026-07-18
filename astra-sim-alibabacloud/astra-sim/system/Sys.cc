@@ -2014,6 +2014,11 @@ int Sys::drain_finished_streams() {
 
 int Sys::start_ready_streams() {
   for (auto& queue_entry : active_Streams) {
+    int& running_streams =
+        scheduler_unit->running_streams[queue_entry.first];
+    if (running_streams >= scheduler_unit->queue_threshold) {
+      continue;
+    }
     for (BaseStream* stream : queue_entry.second) {
       if (stream == nullptr) {
         continue;
@@ -2021,6 +2026,11 @@ int Sys::start_ready_streams() {
       if (stream->phases_to_go.empty() &&
           stream->state == StreamState::Ready &&
           !stream->initialized) {
+        // This is a recovery path for a scheduler slot that became idle without
+        // initializing its next stream. Keep SchedulerUnit's slot accounting in
+        // sync; bypassing it can start two ring steps in the same single-slot
+        // queue and leave peer ranks posting receives for different steps.
+        running_streams++;
         stream->init();
         return 1;
       }
