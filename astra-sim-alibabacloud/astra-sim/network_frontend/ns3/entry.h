@@ -41,6 +41,7 @@
 #include <time.h>
 #include <deque>
 #include <atomic>
+#include <cstdlib>
 #include <set>
 #include <unordered_map>
 #include <mutex>
@@ -67,7 +68,10 @@ using LogicalFlowNotificationKey = std::tuple<int, int, int, int>;
 std::set<LogicalFlowNotificationKey> receiver_notified_logical_flows;
 
 
-std::map<std::pair<int, std::pair<int, int>>, AstraSim::ncclFlowTag> sender_src_port_map; 
+std::map<std::pair<int, std::pair<int, int>>, AstraSim::ncclFlowTag>
+    sender_src_port_map;
+std::map<std::pair<int, std::pair<int, int>>, AstraSim::ncclFlowTag>
+    receiver_src_port_map;
 struct task1 {
   int src;
   int dest;
@@ -80,14 +84,56 @@ struct task1 {
 std::atomic<uint64_t> receiver_callbacks_dispatched{0};
 std::atomic<uint64_t> sender_callbacks_dispatched{0};
 
-void dispatch_receiver_callback(const task1& task) {
+uint64_t flow_progress_interval() {
+  static const uint64_t interval = []() {
+    const char* value = std::getenv("AS_NS3_FLOW_PROGRESS");
+    if (value == nullptr) {
+      return uint64_t{0};
+    }
+    char* end = nullptr;
+    const uint64_t parsed = std::strtoull(value, &end, 10);
+    return end != value ? parsed : uint64_t{0};
+  }();
+  return interval;
+}
+
+void report_sender_progress(uint64_t completed, const task1& task) {
+  const uint64_t interval = flow_progress_interval();
+  if (interval == 0 || completed % interval != 0) {
+    return;
+  }
+  static std::mutex output_mutex;
+  std::lock_guard<std::mutex> lock(output_mutex);
+  std::cout << "[NS3 flow progress] sim_tick=" << Simulator::Now().GetTimeStep()
+            << " sender_callbacks=" << completed
+            << " receiver_callbacks="
+            << receiver_callbacks_dispatched.load(std::memory_order_relaxed)
+            << " src=" << task.src << " dst=" << task.dest
+            << " bytes=" << task.count << std::endl;
+}
+
+void invoke_receiver_callback(task1 task) {
   receiver_callbacks_dispatched.fetch_add(1, std::memory_order_relaxed);
   task.msg_handler(task.fun_arg);
 }
 
+void dispatch_receiver_callback(const task1& task) {
+#ifdef NS3_MTP
+  // QP completion is observed when the ACK returns to the sender. Run the
+  // receive callback in the destination LP so follow-on events are scheduled
+  // by the rank that actually received the flow.
+  Simulator::ScheduleWithContext(
+      task.dest, NanoSeconds(0), &invoke_receiver_callback, task);
+#else
+  invoke_receiver_callback(task);
+#endif
+}
+
 void dispatch_sender_callback(const task1& task) {
-  sender_callbacks_dispatched.fetch_add(1, std::memory_order_relaxed);
+  const uint64_t completed =
+      sender_callbacks_dispatched.fetch_add(1, std::memory_order_relaxed) + 1;
   task.msg_handler(task.fun_arg);
+  report_sender_progress(completed, task);
 }
 using ExpectedReceiveKey = std::pair<int, std::pair<int, int>>;
 using ExpectedReceiveTasks = std::deque<task1>;
@@ -138,6 +184,57 @@ size_t expected_receive_count() {
     count += expected.second.size();
   }
   return count;
+}
+
+void dump_active_qps(size_t limit) {
+  #ifdef NS3_MTP
+  MtpInterface::explicitCriticalSection cs;
+  #endif
+  std::cerr << "[NS3 debug] active QP counts sender="
+            << sender_src_port_map.size()
+            << " receiver=" << receiver_src_port_map.size()
+            << " sender_waiting=" << waiting_to_sent_callback.size()
+            << " receiver_waiting=" << waiting_to_notify_receiver.size()
+            << " sent_chunks=" << sent_chunksize.size()
+            << " received_chunks=" << received_chunksize.size()
+            << std::endl;
+
+  size_t printed = 0;
+  for (const auto& active : sender_src_port_map) {
+    if (printed++ >= limit) {
+      break;
+    }
+    const auto& port_key = active.first;
+    const auto& flow_tag = active.second;
+    std::cerr << "  sender QP port=" << port_key.first
+              << " src=" << port_key.second.first
+              << " dst=" << port_key.second.second
+              << " flow_id=" << flow_tag.current_flow_id
+              << " tag=" << flow_tag.tag_id
+              << " channel=" << flow_tag.channel_id
+              << " flow_size=" << flow_tag.flow_size
+              << std::endl;
+  }
+
+  printed = 0;
+  for (const auto& active : receiver_src_port_map) {
+    if (printed++ >= limit) {
+      break;
+    }
+    const auto& port_key = active.first;
+    const auto& flow_tag = active.second;
+    std::cerr << "  receiver QP port=" << port_key.first
+              << " src=" << port_key.second.first
+              << " dst=" << port_key.second.second
+              << " flow_id=" << flow_tag.current_flow_id
+              << " tag=" << flow_tag.tag_id
+              << " channel=" << flow_tag.channel_id
+              << " flow_size=" << flow_tag.flow_size
+              << std::endl;
+  }
+  #ifdef NS3_MTP
+  cs.ExitSection();
+  #endif
 }
 
 void dump_receive_mismatch(size_t limit) {
@@ -533,7 +630,9 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
       #ifdef NS3_MTP
       MtpInterface::explicitCriticalSection cs;
       #endif
-      sender_src_port_map[make_pair(port, make_pair(src, dst))] = request->flowTag;
+      auto port_key = make_pair(port, make_pair(src, dst));
+      sender_src_port_map[port_key] = request->flowTag;
+      receiver_src_port_map[port_key] = request->flowTag;
       #ifdef NS3_MTP
       cs.ExitSection();
       #endif
@@ -753,7 +852,8 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
   }
 
   AstraSim::ncclFlowTag flowTag;
-  uint64_t notify_size;
+  uint64_t notify_size = 0;
+  bool receive_finished = false;
   {
     #ifdef NS3_MTP
     MtpInterface::explicitCriticalSection cs;
@@ -763,27 +863,29 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     rdma->m_rdma->DeleteRxQp(q->sip.Get(), q->m_pg, q->sport);
     MockNcclLog* NcclLog = MockNcclLog::getInstance();
     NcclLog->writeLog(NcclLogLevel::DEBUG,"qp finish, src:  %d did:  %d port:  %d total bytes:  %llu at the tick:  %d",sid,did,q->sport,q->m_size,AstraSim::Sys::boostedTick());
-    if (sender_src_port_map.find(make_pair(q->sport, make_pair(sid, did))) ==
-        sender_src_port_map.end()) {
+    auto port_key = make_pair(q->sport, make_pair(sid, did));
+    auto receiver_port = receiver_src_port_map.find(port_key);
+    if (receiver_port == receiver_src_port_map.end()) {
       NcclLog->writeLog(NcclLogLevel::ERROR,"could not find the tag, there must be something wrong");
       exit(-1);
     }
-    flowTag = sender_src_port_map[make_pair(q->sport, make_pair(sid, did))];
-    sender_src_port_map.erase(make_pair(q->sport, make_pair(sid, did)));
-    received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))]+=q->m_size;
-    if(!is_receive_finished(sid,did,flowTag)) {
-      #ifdef NS3_MTP
-      cs.ExitSection();
-      #endif
-      return; 
+    flowTag = receiver_port->second;
+    receiver_src_port_map.erase(receiver_port);
+
+    auto flow_key =
+        std::make_pair(flowTag.current_flow_id, std::make_pair(sid, did));
+    received_chunksize[flow_key] += q->m_size;
+    receive_finished = is_receive_finished(sid, did, flowTag);
+    if (receive_finished) {
+      notify_size = received_chunksize[flow_key];
+      received_chunksize.erase(flow_key);
     }
-    notify_size = received_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))];
-    received_chunksize.erase(std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did)));    
     #ifdef NS3_MTP
     cs.ExitSection();
     #endif
   }
-  if (flowTag.flow_size > 0 && notify_size > flowTag.flow_size) {
+  if (receive_finished && flowTag.flow_size > 0 &&
+      notify_size > flowTag.flow_size) {
     MockNcclLog::getInstance()->writeLog(
         NcclLogLevel::WARNING,
         "receiver notification size clamped: flow_id %d src %d dst %d aggregated %llu logical %llu",
@@ -794,35 +896,64 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
         flowTag.flow_size);
     notify_size = flowTag.flow_size;
   }
-  notify_receiver_receive_data(sid, did, notify_size, flowTag);
+  if (receive_finished) {
+    notify_receiver_receive_data(sid, did, notify_size, flowTag);
+  }
 }
 
 void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
+  (void)fout;
   uint32_t sid = ip_to_node_id(q->sip), did = ip_to_node_id(q->dip);
   AstraSim::ncclFlowTag flowTag;
+  uint64_t all_sent_chunksize = 0;
+  bool send_finished = false;
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
-  NcclLog->writeLog(NcclLogLevel::DEBUG,"[Packet sent from NIC] send finish, src:  %d did:  %d port:  %d srcip  %d dstip  %d total bytes:  %llu at the tick:  %d",sid,did,q->sport,q->sip,q->dip,q->m_size,AstraSim::Sys::boostedTick());
-  uint64_t all_sent_chunksize;
+  NcclLog->writeLog(
+      NcclLogLevel::DEBUG,
+      "[Packet sent from NIC] send finish, src: %d dst: %d port: %d total bytes: %llu at the tick: %d",
+      sid,
+      did,
+      q->sport,
+      q->m_size,
+      AstraSim::Sys::boostedTick());
   {
     #ifdef NS3_MTP
     MtpInterface::explicitCriticalSection cs;
     #endif
-    flowTag = sender_src_port_map[make_pair(q->sport, make_pair(sid, did))];
-    sent_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))]+=q->m_size;
-    if(!is_sending_finished(sid,did,flowTag)) {
+    auto port_key = make_pair(q->sport, make_pair(sid, did));
+    auto sender_port = sender_src_port_map.find(port_key);
+    if (sender_port == sender_src_port_map.end()) {
+      NcclLog->writeLog(
+          NcclLogLevel::DEBUG,
+          "duplicate sender completion ignored, src: %d dst: %d port: %d",
+          sid,
+          did,
+          q->sport);
       #ifdef NS3_MTP
       cs.ExitSection();
       #endif
       return;
     }
-    all_sent_chunksize = sent_chunksize[std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did))];
-    sent_chunksize.erase(std::make_pair(flowTag.current_flow_id,std::make_pair(sid,did)));
+    flowTag = sender_port->second;
+    sender_src_port_map.erase(sender_port);
+
+    auto flow_key =
+        std::make_pair(flowTag.current_flow_id, std::make_pair(sid, did));
+    sent_chunksize[flow_key] += q->m_size;
+    send_finished = is_sending_finished(sid, did, flowTag);
+    if (send_finished) {
+      all_sent_chunksize = sent_chunksize[flow_key];
+      sent_chunksize.erase(flow_key);
+    }
     #ifdef NS3_MTP
     cs.ExitSection();
     #endif
   }
+  if (!send_finished) {
+    return;
+  }
   if (flowTag.flow_size > 0 && all_sent_chunksize > flowTag.flow_size) {
-    MockNcclLog::getInstance()->writeLog(
+    NcclLog->writeLog(
         NcclLogLevel::WARNING,
         "sender notification size clamped: flow_id %d src %d dst %d aggregated %llu logical %llu",
         flowTag.current_flow_id,

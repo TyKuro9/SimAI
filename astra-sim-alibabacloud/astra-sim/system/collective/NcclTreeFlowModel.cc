@@ -74,39 +74,18 @@ int packed_treeflow_tag_id(int layer, int stream, int intra) {
 }
 
 #ifdef NS3_MTP
-int packed_ns3_treeflow_tag_id(
-    int layer,
-    int stream,
-    int intra,
-    uint64_t phase_generation) {
-  constexpr int kGenerationBits = 5;
-  constexpr int kIntraBits = 8;
-  constexpr int kStreamBits = 12;
-  constexpr int kLayerBits =
-      31 - kGenerationBits - kStreamBits - kIntraBits;
-  constexpr int kMaxGeneration = (1 << kGenerationBits) - 1;
-  constexpr int kMaxIntra = (1 << kIntraBits) - 1;
-  constexpr int kMaxStream = (1 << kStreamBits) - 1;
-  constexpr int kMaxLayer = (1 << kLayerBits) - 1;
-  if (phase_generation <= static_cast<uint64_t>(kMaxGeneration) &&
-      layer >= 0 && layer <= kMaxLayer && stream >= 0 &&
-      stream <= kMaxStream && intra >= 0 && intra <= kMaxIntra) {
-    return (static_cast<int>(phase_generation) <<
-            (kLayerBits + kStreamBits + kIntraBits)) |
-        (layer << (kStreamBits + kIntraBits)) |
-        (stream << kIntraBits) | intra;
+int ns3_treeflow_tag_id(int flow_id) {
+  // NS3's sent/receive maps require one tag per logical edge. Chunk ids are
+  // reused by multiple ring steps, while MockNcclGroup assigns flow_id from a
+  // process-global monotonic counter. Reserve the positive high-bit namespace
+  // for NCCL logical flows so they cannot alias ordinary API tags.
+  constexpr int kTreeFlowNamespace = 1 << 30;
+  if (flow_id < 0 || flow_id >= kTreeFlowNamespace) {
+    std::cerr << "NS3 tree-flow id exceeds tag namespace: " << flow_id
+              << std::endl;
+    std::abort();
   }
-
-  uint32_t hash = 2166136261u;
-  auto mix = [&hash](uint32_t value) {
-    hash ^= value;
-    hash *= 16777619u;
-  };
-  mix(static_cast<uint32_t>(phase_generation));
-  mix(static_cast<uint32_t>(layer));
-  mix(static_cast<uint32_t>(stream));
-  mix(static_cast<uint32_t>(intra));
-  return static_cast<int>(hash & 0x7fffffffu);
+  return kTreeFlowNamespace | flow_id;
 }
 #endif
 
@@ -322,6 +301,10 @@ int NcclTreeFlowModel::get_non_zero_latency_packets() {
 int NcclTreeFlowModel::tag_id_for_flow(
     const MockNccl::SingleFlow& flow_model,
     bool receive) const {
+#ifdef NS3_MTP
+  (void)receive;
+  return ns3_treeflow_tag_id(flow_model.flow_id);
+#else
   int stream_tag = stream == nullptr ? layer_num : stream->stream_num;
   int intra_tag =
       flow_model.chunk_count * flow_model.channel_id + flow_model.chunk_id;
@@ -329,13 +312,6 @@ int NcclTreeFlowModel::tag_id_for_flow(
       flow_model.conn_type != "RING") {
     intra_tag += 1;
   }
-#ifdef NS3_MTP
-  uint64_t phase_generation = stream == nullptr
-      ? 0
-      : stream->phase_generation.load(std::memory_order_acquire);
-  return packed_ns3_treeflow_tag_id(
-      layer_num, stream_tag, intra_tag, phase_generation);
-#else
   return packed_treeflow_tag_id(layer_num, stream_tag, intra_tag);
 #endif
 }
@@ -343,7 +319,32 @@ int NcclTreeFlowModel::tag_id_for_flow(
 int NcclTreeFlowModel::tag_id_for_receive_from(
     const MockNccl::SingleFlow& flow_model,
     int recv_prev) const {
+#ifdef NS3_MTP
+  // Sending one ring step posts the receive for the sibling edge entering
+  // this rank in the same step. The dependency parent belongs to the previous
+  // step and therefore has a different logical-flow tag.
+  const MockNccl::SingleFlow* matched_flow = nullptr;
+  for (const auto& entry : _flow_models) {
+    const MockNccl::SingleFlow& candidate = entry.second;
+    if (candidate.channel_id == flow_model.channel_id &&
+        candidate.src == recv_prev && candidate.dest == id &&
+        candidate.chunk_id == flow_model.chunk_id &&
+        candidate.chunk_count == flow_model.chunk_count &&
+        candidate.flow_size == flow_model.flow_size) {
+      if (matched_flow != nullptr) {
+        matched_flow = nullptr;
+        break;
+      }
+      matched_flow = &candidate;
+    }
+  }
+  if (matched_flow != nullptr) {
+    return tag_id_for_flow(*matched_flow, false);
+  }
+#else
   (void)recv_prev;
+#endif
+
   return tag_id_for_flow(flow_model, true);
 }
 

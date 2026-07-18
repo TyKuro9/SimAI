@@ -2457,9 +2457,29 @@ void Sys::handleEvent(void* arg) {
     StreamBaseline* owner = static_cast<StreamBaseline*>(rcehd->owner);
 #ifdef NS3_MTP
     auto release_pending_receive = [owner]() {
-      if (owner != nullptr &&
-          owner->pending_receives.load(std::memory_order_acquire) != 0) {
-        owner->pending_receives.fetch_sub(1, std::memory_order_acq_rel);
+      if (owner == nullptr) {
+        return false;
+      }
+      uint64_t pending =
+          owner->pending_receives.load(std::memory_order_acquire);
+      while (pending != 0) {
+        if (owner->pending_receives.compare_exchange_weak(
+                pending,
+                pending - 1,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+          return pending == 1;
+        }
+      }
+      return false;
+    };
+    auto resume_zombie_if_drained = [owner](bool drained) {
+      if (!drained) {
+        return;
+      }
+      std::lock_guard<std::recursive_mutex> lock(owner->phase_mutex);
+      if (owner->state == StreamState::Zombie) {
+        owner->owner->proceed_to_next_vnet_baseline(owner);
       }
     };
 #endif
@@ -2469,16 +2489,19 @@ void Sys::handleEvent(void* arg) {
         rcehd->phase_generation !=
             owner->phase_generation.load(std::memory_order_acquire)) {
 #ifdef NS3_MTP
-      release_pending_receive();
+      resume_zombie_if_drained(release_pending_receive());
 #endif
       delete rcehd;
       return;
     }
 #endif
 #ifdef NS3_MTP
-    release_pending_receive();
+    bool receive_queue_drained = release_pending_receive();
 #endif
     owner->consume(rcehd);
+#ifdef NS3_MTP
+    resume_zombie_if_drained(receive_queue_drained);
+#endif
     delete rcehd;
   } else if (event == EventType::PacketSent) {
     SendPacketEventHandlerData* sendhd = (SendPacketEventHandlerData*)ehd;
