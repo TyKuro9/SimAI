@@ -1,0 +1,82 @@
+{
+  "binary": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/astra-sim-alibabacloud/extern/network_backend/ns3-interface/simulation/build/scratch/ns3.36.1-AstraSimNetwork-debug",
+  "binary_sha256": "e3319ee2b02857af2c996a14438625e9767633706d5c5ddfe38c47eb637509c0",
+  "completion_log": false,
+  "created_at_utc": "2026-07-17T04:22:52.580090+00:00",
+  "flowlet_bytes": 0,
+  "flowlet_gap_ns": 5000,
+  "flowlet_hysteresis_ns": 500,
+  "jct_only": true,
+  "parallel_runs": 5,
+  "policies": [
+    "spray_adaptive"
+  ],
+  "pxn": false,
+  "send_latency": 3,
+  "spray_width": 4,
+  "threads_per_run": 8,
+  "timeout_seconds": 259200,
+  "topologies": {
+    "DeepSeek": {
+      "gpu_type": "H100",
+      "gpus_per_server": 8,
+      "links": 3072,
+      "nodes": 1344,
+      "path": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/mytopo/1024_12p8T/DeepSeek_1024g_8gps_p32a0.5_400Gbps_H100",
+      "servers": 128,
+      "sha256": "3ae5b65d6c37c84072ceeaa537181ea7e0aad1c017a440b8aee6243b8078cec0",
+      "switches": 192
+    },
+    "HPN": {
+      "gpu_type": "H100",
+      "gpus_per_server": 8,
+      "links": 4096,
+      "nodes": 1248,
+      "path": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/mytopo/1024_12p8T/AlibabaHPN_1024g_8gps_DualToR_DualPlane_200Gbps_H100",
+      "servers": 128,
+      "sha256": "beb80272fbeecd2b71967aeec8f9f151a98df3fd1a1fdb72da14582ac29f8b28",
+      "switches": 96
+    },
+    "Meta": {
+      "gpu_type": "H100",
+      "gpus_per_server": 8,
+      "links": 3072,
+      "nodes": 1232,
+      "path": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/mytopo/1024_12p8T/Meta_Topo_1024g_8gps_400Gbps_H100_12p8T",
+      "servers": 128,
+      "sha256": "a1a6bd9283629445001a2f02ac880970537c94a2018c9e68bc9c7877125f25d0",
+      "switches": 80
+    },
+    "ROFT": {
+      "gpu_type": "H100",
+      "gpus_per_server": 8,
+      "links": 3072,
+      "nodes": 1232,
+      "path": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/mytopo/1024_12p8T/ROFT_1024g_8gps_p32a0.5_400Gbps_H100_12p8T",
+      "servers": 128,
+      "sha256": "a9f8b21252aaa630863136ea180e76900a6a20537b64acae68b78c1f9de14b34",
+      "switches": 80
+    },
+    "Zcube": {
+      "gpu_type": "H100",
+      "gpus_per_server": 8,
+      "links": 4096,
+      "nodes": 1216,
+      "path": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/mytopo/1024_12p8T/Zcube_n32_k2_1024g_8gps_200Gbps_H100",
+      "servers": 128,
+      "sha256": "dbdd1a6a15e510713dd9652e4ab666dedba0afdbb903d6194effe61a808b9f6f",
+      "switches": 64
+    }
+  },
+  "workloads": {
+    "Dense": {
+      "all_gpus": 1024,
+      "ep": 1,
+      "ga": 6,
+      "model_parallel_NPU_group": 8,
+      "path": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/my_workloads/H100-gpt_22B-world_size1024-tp8-pp4-ep1-gbs192-mbs1-seq2048-MOE-False-GEMM-False-flash_attn-True.txt",
+      "pp": 4,
+      "sha256": "f97e16b9bcbb362e740892caea233bcf5863a21b2afbd25e420582ff02c88d86"
+    }
+  }
+}

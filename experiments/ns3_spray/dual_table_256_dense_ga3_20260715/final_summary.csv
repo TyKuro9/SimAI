@@ -1,0 +1,4 @@
+topology,jct_us,jct_ms,vs_deepseek_pct,total_comp_us,exposed_comm_us,physical_qps,logical_flows,logical_fct_p50_ns,logical_fct_p95_ns,logical_fct_p99_ns,logical_fct_max_ns,fct_source
+DeepSeek,452354.475,452.354475,0.000,406886.017,45468.458,1906688,1895936,4762.0,4768.0,188801.0,3439862,DeepSeek/spray_dual_table/fct.txt
+HPN,477553.253,477.553253,5.571,406886.017,70667.236,1906688,1895936,4762.0,4768.0,188801.0,9611074,../dual_table_256_dense_ga3_hpn_fct_recheck_20260715/HPN/spray_dual_table/fct.txt
+Zcube,488823.024,488.823024,8.062,406886.017,81937.007,1906688,1895936,4762.0,4768.0,188801.0,6912390,Zcube/spray_dual_table/fct.txt

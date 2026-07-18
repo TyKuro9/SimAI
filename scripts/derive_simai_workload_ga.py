@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Derive a smaller-GA SimAI workload while preserving per-layer records."""
+"""Derive a SimAI workload with a different GA value."""
 
 from __future__ import annotations
 
@@ -32,8 +32,8 @@ def derive_workload(
     if match is None:
         raise ValueError(f"{source} header has no GA field")
     source_ga = int(match.group(1))
-    if not 1 <= target_ga <= source_ga:
-        raise ValueError(f"target GA must be between 1 and {source_ga}")
+    if target_ga < 1:
+        raise ValueError("target GA must be positive")
 
     declared_records = int(lines[1])
     records = lines[2:]
@@ -67,10 +67,21 @@ def derive_workload(
     if block_end > len(records):
         raise ValueError("last GA block extends beyond the workload")
     suffix = records[block_end:]
-    selected_blocks = records[
-        marker_positions[0] : marker_positions[0] + target_ga * block_size
+    blocks = [
+        records[position : position + block_size] for position in marker_positions
     ]
-    output_records = prefix + selected_blocks + suffix
+    if target_ga <= source_ga:
+        selected_blocks = blocks[:target_ga]
+    else:
+        steady_block = blocks[-1]
+        if any(block != steady_block for block in blocks[1:]):
+            raise ValueError(
+                "cannot increase GA because source steady-state blocks differ"
+            )
+        selected_blocks = blocks + [steady_block] * (target_ga - source_ga)
+
+    flattened_blocks = [record for block in selected_blocks for record in block]
+    output_records = prefix + flattened_blocks + suffix
     output_header = GA_RE.sub(f"ga: {target_ga}", lines[0], count=1)
     if target_world_size is not None:
         if target_world_size < 1:

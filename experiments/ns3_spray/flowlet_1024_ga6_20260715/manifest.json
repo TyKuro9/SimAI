@@ -1,0 +1,61 @@
+{
+  "binary": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/astra-sim-alibabacloud/extern/network_backend/ns3-interface/simulation/build/scratch/ns3.36.1-AstraSimNetwork-debug",
+  "binary_sha256": "9ab198e9559fe66287547d9291b89e29d3e9a72b7f92ab72b12ad4c6075e94b4",
+  "completion_log": false,
+  "created_at_utc": "2026-07-14T18:05:14.880034+00:00",
+  "flowlet_bytes": 0,
+  "flowlet_gap_ns": 5000,
+  "flowlet_hysteresis_ns": 500,
+  "jct_only": true,
+  "parallel_runs": 4,
+  "policies": [
+    "spray_flowlet"
+  ],
+  "pxn": false,
+  "send_latency": 3,
+  "spray_width": 4,
+  "threads_per_run": 8,
+  "timeout_seconds": 129600,
+  "topologies": {
+    "DeepSeek": {
+      "gpu_type": "H100",
+      "gpus_per_server": 8,
+      "links": 3072,
+      "nodes": 1344,
+      "path": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/mytopo/1024/DeepSeek_1024g_8gps_p16a0.5_400Gbps_H100",
+      "servers": 128,
+      "sha256": "d676d6c3d76dc4ddaf0f87141755572d9753af31442ac94dc0dedc97bca41aea",
+      "switches": 192
+    },
+    "Zcube": {
+      "gpu_type": "H100",
+      "gpus_per_server": 8,
+      "links": 4096,
+      "nodes": 1216,
+      "path": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/mytopo/1024/Zcube_n32_k2_1024g_8gps_200Gbps_H100",
+      "servers": 128,
+      "sha256": "dbdd1a6a15e510713dd9652e4ab666dedba0afdbb903d6194effe61a808b9f6f",
+      "switches": 64
+    }
+  },
+  "workloads": {
+    "Dense": {
+      "all_gpus": 1024,
+      "ep": 1,
+      "ga": 6,
+      "model_parallel_NPU_group": 8,
+      "path": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/my_workloads/H100-gpt_175B-world_size1024-tp8-pp8-ep1-gbs96-mbs1-seq2048-MOE-False-GEMM-False-flash_attn-True.txt",
+      "pp": 8,
+      "sha256": "55c0be7ca1f3ebadfce091c612db4ca3c8aff6e4c9af89261285592af816ccd9"
+    },
+    "MoE": {
+      "all_gpus": 1024,
+      "ep": 8,
+      "ga": 6,
+      "model_parallel_NPU_group": 8,
+      "path": "/home/zty/Topo/SimAI_TyKuro9_spray_algo_iter2/my_workloads/H100-gpt_175B-world_size1024-tp8-pp8-ep8-gbs96-mbs1-seq2048-MOE-True-GEMM-True-flash_attn-True.txt",
+      "pp": 8,
+      "sha256": "36b99318ce43a81b69fdc414a38479ecf745fda9b2205707cca27384ba6a8a39"
+    }
+  }
+}
