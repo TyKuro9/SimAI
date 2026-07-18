@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
@@ -176,29 +177,47 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_DYNAMIC_DIR / "comparison",
     )
+    parser.add_argument("--wait-seconds", type=float, default=0.0)
+    parser.add_argument("--wait-timeout-seconds", type=float, default=259200.0)
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    now = datetime.now(timezone.utc)
-    rows = matrix_rows(
-        args.dynamic_dir.resolve(),
-        "spray_dynamic_chunk",
-        "dynamic",
-        now,
-    )
-    rows.extend(
-        matrix_rows(
-            args.baseline_dir.resolve(),
-            "spray_adaptive",
-            "adaptive",
+    if args.wait_seconds < 0.0 or args.wait_timeout_seconds <= 0.0:
+        raise SystemExit("wait interval must be non-negative and timeout positive")
+    output_dir = args.output_dir.resolve()
+    wait_started = time.monotonic()
+    while True:
+        now = datetime.now(timezone.utc)
+        rows = matrix_rows(
+            args.dynamic_dir.resolve(),
+            "spray_dynamic_chunk",
+            "dynamic",
             now,
         )
-    )
-    output_dir = args.output_dir.resolve()
-    write_csv(output_dir / "progress.csv", rows)
-    write_report(output_dir / "progress.md", rows)
+        rows.extend(
+            matrix_rows(
+                args.baseline_dir.resolve(),
+                "spray_adaptive",
+                "adaptive",
+                now,
+            )
+        )
+        write_csv(output_dir / "progress.csv", rows)
+        write_report(output_dir / "progress.md", rows)
+        complete = all(row["status"] == "complete" for row in rows)
+        if complete or args.wait_seconds == 0.0:
+            break
+        elapsed = time.monotonic() - wait_started
+        if elapsed >= args.wait_timeout_seconds:
+            raise SystemExit("timed out waiting for NS3 spray matrices")
+        print(
+            f"updated progress for {len(rows)} runs; "
+            f"{sum(row['status'] == 'complete' for row in rows)} complete",
+            flush=True,
+        )
+        time.sleep(min(args.wait_seconds, args.wait_timeout_seconds - elapsed))
     print(output_dir / "progress.csv")
     print(output_dir / "progress.md")
     return 0
