@@ -125,10 +125,11 @@ def matrix_rows(
             complete = result.get("status") == "success"
             if complete:
                 progress = 1.0
+            draining = not complete and completed_events >= expected_events
             eta_seconds: object = "n/a"
             if complete:
                 eta_seconds = 0.0
-            elif progress > 0.0:
+            elif not draining and progress > 0.0:
                 eta_seconds = elapsed * (1.0 - progress) / progress
             log_age_seconds: object = "missing"
             if log_path.exists():
@@ -142,7 +143,9 @@ def matrix_rows(
                     "workload_kind": workload_name,
                     "topology": topology,
                     "policy": policy,
-                    "status": "complete" if complete else "running",
+                    "status": (
+                        "complete" if complete else "draining" if draining else "running"
+                    ),
                     "completed_events": completed_events,
                     "expected_events": expected_events,
                     "latest_layer": layer if layer is not None else "missing",
@@ -173,12 +176,13 @@ def write_report(path: Path, rows: list[dict[str, object]]) -> None:
         "Progress counts issued collective events and remains monotonic when execution changes from forward to backward layers.",
         "ETA extrapolates from event count and is only a rough wall-time estimate because collective sizes differ.",
         "",
-        "| Role | Workload | Topology | Events | Latest layer | Progress | Log age | ETA | JCT (us) |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|",
+        "| Role | Workload | Topology | Phase | Events | Latest layer | Progress | Log age | ETA | JCT (us) |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
             f"| {row['role']} | {row['workload_kind']} | {row['topology']} | "
+            f"{row['status']} | "
             f"{row['completed_events']} / {row['expected_events']} | "
             f"{row['latest_layer']} / {int(row['records']) - 1} | "
             f"{float(row['progress_pct']):.1f}% | "
