@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import math
+import time
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -257,11 +258,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dynamic-policy", default="spray_dynamic_chunk")
     parser.add_argument("--allow-incomplete", action="store_true")
     parser.add_argument("--allow-mismatch", action="store_true")
+    parser.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=0.0,
+        help="poll incomplete result matrices at this interval",
+    )
+    parser.add_argument(
+        "--wait-timeout-seconds",
+        type=float,
+        default=259200.0,
+        help="maximum time to wait for complete matrices",
+    )
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.wait_seconds < 0.0 or args.wait_timeout_seconds <= 0.0:
+        raise SystemExit("wait interval must be non-negative and timeout positive")
     baseline_dir = args.baseline_dir.resolve()
     dynamic_dir = args.dynamic_dir.resolve()
     output_dir = (
@@ -278,14 +293,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit(f"experiment matrices are not comparable: {names}")
 
     keys = expected_keys(dynamic_manifest)
-    rows = build_comparison(
-        read_rows(baseline_dir / "jct_results.csv"),
-        read_rows(dynamic_dir / "jct_results.csv"),
-        args.baseline_policy,
-        args.dynamic_policy,
-        keys,
-    )
-    pending = [row for row in rows if row["status"] != "complete"]
+    wait_started = time.monotonic()
+    while True:
+        rows = build_comparison(
+            read_rows(baseline_dir / "jct_results.csv"),
+            read_rows(dynamic_dir / "jct_results.csv"),
+            args.baseline_policy,
+            args.dynamic_policy,
+            keys,
+        )
+        pending = [row for row in rows if row["status"] != "complete"]
+        if not pending or args.allow_incomplete or args.wait_seconds == 0.0:
+            break
+        elapsed = time.monotonic() - wait_started
+        if elapsed >= args.wait_timeout_seconds:
+            raise SystemExit(
+                f"timed out waiting for {len(pending)} incomplete A/B cases"
+            )
+        labels = ", ".join(
+            f"{row['workload_kind']}/{row['topology']}" for row in pending
+        )
+        print(f"waiting for {len(pending)} A/B cases: {labels}", flush=True)
+        time.sleep(min(args.wait_seconds, args.wait_timeout_seconds - elapsed))
     if pending and not args.allow_incomplete:
         labels = ", ".join(
             f"{row['workload_kind']}/{row['topology']}" for row in pending
