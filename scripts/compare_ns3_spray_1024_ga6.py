@@ -292,6 +292,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         names = ", ".join(str(check["check"]) for check in failed_checks)
         raise SystemExit(f"experiment matrices are not comparable: {names}")
 
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "comparability.json").write_text(
+        json.dumps(checks, indent=2, sort_keys=True) + "\n"
+    )
     keys = expected_keys(dynamic_manifest)
     wait_started = time.monotonic()
     while True:
@@ -303,6 +307,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             keys,
         )
         pending = [row for row in rows if row["status"] != "complete"]
+        write_csv(output_dir / "jct_comparison.csv", rows)
+        write_report(output_dir / "report.md", rows, checks)
         if not pending or args.allow_incomplete or args.wait_seconds == 0.0:
             break
         elapsed = time.monotonic() - wait_started
@@ -321,12 +327,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         raise SystemExit(f"incomplete A/B cases: {labels}")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    write_csv(output_dir / "jct_comparison.csv", rows)
-    (output_dir / "comparability.json").write_text(
-        json.dumps(checks, indent=2, sort_keys=True) + "\n"
-    )
-    write_report(output_dir / "report.md", rows, checks)
     print(output_dir / "jct_comparison.csv")
     print(output_dir / "report.md")
     return 0
