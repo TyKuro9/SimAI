@@ -1,0 +1,5 @@
+topology,policy,jct_us,wall_seconds,dynamic_vs_adaptive_pct,zcube_vs_deepseek_pct,spray_width,dynamic_chunks,threads,pxn,record_mode
+DeepSeek,spray_adaptive,1233.741,100.061,0.0,0.0,4,8,4,false,jct
+DeepSeek,spray_dynamic_chunk,1252.722,104.071,1.5384914662,0.0,4,8,4,false,jct
+Zcube,spray_adaptive,1231.859,86.055,0.0,-0.1525441726,4,8,4,false,jct
+Zcube,spray_dynamic_chunk,1251.592,90.059,1.6018878784,-0.0902035727,4,8,4,false,jct
