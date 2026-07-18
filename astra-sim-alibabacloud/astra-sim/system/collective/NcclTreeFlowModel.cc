@@ -795,7 +795,14 @@ void NcclTreeFlowModel::process_stream_count(int channel_id) {
     } else if (stream_it != _stream_count.end()) {
       stream_count = stream_it->second;
     }
-    should_mark_zombie = stream_count == 0 && stream->state != StreamState::Dead;
+    bool all_channels_finished = std::all_of(
+        _stream_count.begin(),
+        _stream_count.end(),
+        [](const std::pair<const int, int>& channel) {
+          return channel.second == 0;
+        });
+    should_mark_zombie =
+        all_channels_finished && stream->state != StreamState::Dead;
   }
   if (send_packets.load(std::memory_order_acquire) > 0) {
     send_packets.fetch_sub(1, std::memory_order_acq_rel);

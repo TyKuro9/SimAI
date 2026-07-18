@@ -318,7 +318,24 @@ namespace MockNccl {
       }
       return presult;
     } else {
+      int first_flow_id = g_flow_id;
       flow_models[flow_model_name] = genFlowModels(type,rank,op,data_size);
+      const char* target_flow_env = std::getenv("AS_NCCL_FLOW_ID_DIAG");
+      if (target_flow_env != nullptr) {
+        char* end = nullptr;
+        long target_flow_id = std::strtol(target_flow_env, &end, 10);
+        if (end != target_flow_env && *end == '\0' &&
+            target_flow_id >= first_flow_id && target_flow_id < g_flow_id) {
+          std::cerr << "[NCCL flow id diag] target=" << target_flow_id
+                    << " range=[" << first_flow_id << "," << g_flow_id << ")"
+                    << " group=" << flow_model_name
+                    << " rank=" << rank
+                    << " layer=" << layer_num
+                    << " state=" << static_cast<int>(loopstate)
+                    << " op=" << static_cast<int>(op)
+                    << " bytes=" << data_size << std::endl;
+        }
+      }
       FlowName2nums[flow_model_name]= 1;
       return flow_models[flow_model_name][rank];
     }
