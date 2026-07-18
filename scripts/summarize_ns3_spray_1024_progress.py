@@ -41,7 +41,7 @@ def read_result_index(path: Path) -> dict[tuple[str, str, str], dict[str, str]]:
         }
 
 
-def workload_records(path: Path) -> int:
+def workload_shape(path: Path) -> tuple[int, int]:
     lines = path.read_text(errors="replace").splitlines()
     if len(lines) < 2:
         raise SystemExit(f"invalid workload: {path}")
@@ -50,7 +50,23 @@ def workload_records(path: Path) -> int:
         raise SystemExit(
             f"{path}: declared {declared} records but found {len(lines) - 2}"
         )
-    return declared
+    collective_events = 0
+    for layer, line in enumerate(lines[2:]):
+        fields = line.split()
+        if len(fields) < 11:
+            raise SystemExit(f"{path}: malformed workload record {layer}")
+        for type_index, size_index in ((3, 4), (6, 7), (9, 10)):
+            try:
+                size = float(fields[size_index])
+            except ValueError as error:
+                raise SystemExit(
+                    f"{path}: invalid communication size in record {layer}"
+                ) from error
+            if fields[type_index].upper() != "NONE" and size > 0:
+                collective_events += 1
+    if collective_events == 0:
+        raise SystemExit(f"{path}: workload has no collective events")
+    return declared, collective_events
 
 
 def parse_start(value: object) -> datetime:
@@ -71,11 +87,11 @@ def format_duration(seconds: object) -> str:
     return f"{minutes}m {secs:02d}s"
 
 
-def latest_layer(path: Path) -> Optional[int]:
+def log_progress(path: Path) -> tuple[int, Optional[int]]:
     if not path.exists():
-        return None
+        return 0, None
     matches = LAYER_RE.findall(path.read_text(errors="replace"))
-    return int(matches[-1]) if matches else None
+    return len(matches), int(matches[-1]) if matches else None
 
 
 def matrix_rows(
@@ -97,12 +113,12 @@ def matrix_rows(
         if not isinstance(workload_fields, dict):
             raise SystemExit(f"malformed workload manifest entry: {workload_name}")
         workload_path = Path(str(workload_fields["path"]))
-        records = workload_records(workload_path)
+        records, expected_events = workload_shape(workload_path)
         for topology in topologies:
             run_dir = matrix_dir / str(workload_name) / str(topology) / policy
             log_path = run_dir / "run.log"
-            layer = latest_layer(log_path)
-            progress = min(1.0, (layer + 1) / records) if layer is not None else 0.0
+            completed_events, layer = log_progress(log_path)
+            progress = min(1.0, completed_events / expected_events)
             result = result_index.get(
                 (str(workload_name), str(topology), policy), {}
             )
@@ -127,6 +143,8 @@ def matrix_rows(
                     "topology": topology,
                     "policy": policy,
                     "status": "complete" if complete else "running",
+                    "completed_events": completed_events,
+                    "expected_events": expected_events,
                     "latest_layer": layer if layer is not None else "missing",
                     "records": records,
                     "progress_pct": progress * 100.0,
@@ -152,14 +170,16 @@ def write_report(path: Path, rows: list[dict[str, object]]) -> None:
     lines = [
         "# NS3 1024-GPU Spray Progress",
         "",
-        "ETA extrapolates from the latest workload record index and is only a rough wall-time estimate.",
+        "Progress counts issued collective events and remains monotonic when execution changes from forward to backward layers.",
+        "ETA extrapolates from event count and is only a rough wall-time estimate because collective sizes differ.",
         "",
-        "| Role | Workload | Topology | Layer | Progress | Log age | ETA | JCT (us) |",
-        "|---|---|---|---:|---:|---:|---:|---:|",
+        "| Role | Workload | Topology | Events | Latest layer | Progress | Log age | ETA | JCT (us) |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
             f"| {row['role']} | {row['workload_kind']} | {row['topology']} | "
+            f"{row['completed_events']} / {row['expected_events']} | "
             f"{row['latest_layer']} / {int(row['records']) - 1} | "
             f"{float(row['progress_pct']):.1f}% | "
             f"{format_duration(row['log_age_seconds'])} | "
