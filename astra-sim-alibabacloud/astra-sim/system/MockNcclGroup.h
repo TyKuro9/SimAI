@@ -21,6 +21,7 @@
 #include <string>
 #include <memory>
 #include <map>
+#include <mutex>
 #include <unordered_map>
 #include "astra-sim/system/Common.hh"
 #include"astra-sim/system/MockNccl.h"
@@ -137,6 +138,7 @@ namespace MockNccl {
     std::map<std::string ,struct ncclInfo*> nccl_infos;  
     std::shared_ptr<void> getFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size,int layer_num,State loopstate);
    private:
+    std::mutex flow_models_mutex;
     std::map<int,std::shared_ptr<FlowModels>> genFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size);
     std::map<int,std::shared_ptr<FlowModels>> genReduceScatterFlowModels(GroupType type , int rank, uint64_t data_size);
     std::map<int,std::shared_ptr<FlowModels>> genAlltoAllFlowModels(GroupType type, int rank, uint64_t data_size);

@@ -32,6 +32,7 @@ LICENSE file in the root directory of this source tree.
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <numeric>
 
 MockNccl::MockNcclGroup* GlobalGroup = nullptr;
@@ -41,6 +42,32 @@ std::atomic<bool> Sys::g_sys_inCriticalSection(false);
 Tick Sys::offset = 0;
 uint8_t* Sys::dummy_data = new uint8_t[2];
 std::vector<Sys*> Sys::all_generators;
+
+namespace {
+bool is_safe_final_flush_event(EventType event) {
+  return event == EventType::General ||
+      event == EventType::Workload_Wait ||
+      event == EventType::Wight_Grad_Comm_Finished_After_Delay ||
+      event == EventType::Input_Grad_Comm_Finished_After_Delay ||
+      event == EventType::Fwd_Comm_Finished_After_Delay;
+}
+
+const char* loop_state_name(Workload::LoopState state) {
+  switch (state) {
+    case Workload::LoopState::Forward_Pass:
+      return "forward";
+    case Workload::LoopState::Forward_In_BackPass:
+      return "forward_in_backpass";
+    case Workload::LoopState::Input_Gradient:
+      return "input_grad";
+    case Workload::LoopState::Weight_Gradient:
+      return "weight_grad";
+    case Workload::LoopState::Wait_For_Sim_Finish:
+      return "wait_for_finish";
+  }
+  return "unknown";
+}
+} // namespace
 
 Sys::~Sys() {
   end_sim_time = std::chrono::high_resolution_clock::now();
@@ -158,6 +185,8 @@ Sys::Sys(
   this->npu_offset=npu_offset;
   this->method = "baseline";
   this->finished_workloads = 0;
+  this->suppress_auto_delete = false;
+  this->workload_reported = false;
   this->streams_finished = 0;
   this->streams_injected = 0;
   this->first_phase_streams = 0;
@@ -296,7 +325,7 @@ Sys::Sys(
         "Unable to initialize the workload layer because it can not open the workload file");
     return;
   }
-  #if defined(NS3_MTP) || defined(NS3_MPI) || defined(PHY_MTP)
+  #if defined(NS3_MTP) || defined(NS3_MPI) || defined(PHY_MTP) || defined(HTSIM_BACKEND)
   result = mock_nccl_grobal_group_init();
   if(result == false) {
     sys_panic(
@@ -1443,7 +1472,68 @@ DataSet* Sys::generate_collective(
     return dataset;
   }
   uint64_t chunk_size = determine_chunk_size(size, collective_type);
-  if(id == 0) std::cout << "chunk size is: " << chunk_size << " , size is: " << size << " , layer_num is: " << layer_num << " , node: " << id << std::endl;
+  if (id == 0) {
+    static auto phase_progress_start = std::chrono::steady_clock::now();
+    static int highest_layer_seen = -1;
+    static Workload::LoopState last_progress_state =
+        Workload::LoopState::Wait_For_Sim_Finish;
+    highest_layer_seen = std::max(highest_layer_seen, layer_num);
+
+    size_t total_layers = workload == nullptr ? 0 : (size_t)workload->SIZE;
+    Workload::LoopState current_progress_state = workload == nullptr
+        ? Workload::LoopState::Wait_For_Sim_Finish
+        : workload->current_state;
+    if (current_progress_state != last_progress_state) {
+      phase_progress_start = std::chrono::steady_clock::now();
+      last_progress_state = current_progress_state;
+    }
+
+    int issued_layers = highest_layer_seen + 1;
+    int phase_completed_layers = issued_layers;
+    bool reverse_phase =
+        current_progress_state == Workload::LoopState::Input_Gradient ||
+        current_progress_state == Workload::LoopState::Weight_Gradient;
+    if (total_layers > 0 && reverse_phase) {
+      phase_completed_layers =
+          std::max<int>((int)total_layers - layer_num, 0);
+    }
+    double phase_elapsed_seconds =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - phase_progress_start)
+            .count() /
+        1000.0;
+    double phase_layer_rate = phase_elapsed_seconds > 0
+        ? phase_completed_layers / phase_elapsed_seconds
+        : 0.0;
+    long long eta_seconds = -1;
+    if (total_layers > 0 && phase_layer_rate > 0) {
+      int remaining_layers =
+          std::max<int>((int)total_layers - phase_completed_layers, 0);
+      eta_seconds = (long long)(remaining_layers / phase_layer_rate);
+    }
+
+    std::cout << "chunk size is: " << chunk_size << " , size is: " << size
+              << " , layer_num is: " << layer_num << " , node: " << id;
+    if (total_layers > 0) {
+      uint64_t issued_percent_x100 =
+          (uint64_t)issued_layers * 10000ULL / (uint64_t)total_layers;
+      uint64_t phase_percent_x100 =
+          (uint64_t)phase_completed_layers * 10000ULL / (uint64_t)total_layers;
+      std::cout << " , phase: " << loop_state_name(current_progress_state)
+                << " , phase_progress: " << phase_completed_layers << "/"
+                << total_layers << " (" << (phase_percent_x100 / 100) << "."
+                << ((phase_percent_x100 % 100) < 10 ? "0" : "")
+                << (phase_percent_x100 % 100) << "%)"
+                << " , issued_progress: " << issued_layers << "/"
+                << total_layers << " (" << (issued_percent_x100 / 100) << "."
+                << ((issued_percent_x100 % 100) < 10 ? "0" : "")
+                << (issued_percent_x100 % 100) << "%)";
+      if (eta_seconds >= 0) {
+        std::cout << " , phase_ETA " << eta_seconds << "s";
+      }
+    }
+    std::cout << std::endl;
+  }
   uint64_t recommended_chunk_size = chunk_size;
   int streams = (chunk_size > 0) ? (int)ceil(((double)size) / chunk_size) : 1;
   int64_t tmp;
@@ -1713,15 +1803,72 @@ void Sys::call_events() {
   event_queue.erase(Sys::boostedTick());
   cs.ExitSection();
   }
-  FINISH_CHECK: if ((finished_workloads == 1 && event_queue.size() == 0 && pending_sends.size() == 0) ||
-      initialized == false) {
-#if defined(NS3_MTP) || defined(NS3_MPI)
+  FINISH_CHECK: if (!suppress_auto_delete &&
+      ((finished_workloads == 1 && event_queue.size() == 0 && pending_sends.size() == 0) ||
+       initialized == false)) {
+#if defined(NS3_MTP) || defined(NS3_MPI) || defined(HTSIM_BACKEND)
     return;
 #else
     delete this;
 #endif
   }
 
+}
+int Sys::flush_pending_events() {
+  int flushed = 0;
+  bool old_suppress_auto_delete = suppress_auto_delete;
+  suppress_auto_delete = true;
+  while (true) {
+    auto target_it = event_queue.end();
+    for (auto it = event_queue.begin(); it != event_queue.end(); ++it) {
+      bool has_safe_event = false;
+      for (const auto& callable : it->second) {
+        if (is_safe_final_flush_event(std::get<1>(callable))) {
+          has_safe_event = true;
+          break;
+        }
+      }
+      if (has_safe_event) {
+        target_it = it;
+        break;
+      }
+    }
+    if (target_it == event_queue.end()) {
+      break;
+    }
+    Tick target_tick = target_it->first;
+    Tick now = Sys::boostedTick();
+    if (target_tick > now) {
+      Sys::offset += target_tick - now;
+    }
+    auto current_it = event_queue.find(Sys::boostedTick());
+    if (current_it == event_queue.end()) {
+      continue;
+    }
+    for (auto it = current_it->second.begin(); it != current_it->second.end();) {
+      if (!is_safe_final_flush_event(std::get<1>(*it))) {
+        ++it;
+        continue;
+      }
+      try {
+        pending_events--;
+        std::get<0>(*it)->call(std::get<1>(*it), std::get<2>(*it));
+      } catch (...) {
+        std::cerr << "warning! a callable is removed before final flush"
+                  << std::endl;
+      }
+      it = current_it->second.erase(it);
+    }
+    if (current_it->second.empty()) {
+      event_queue.erase(current_it);
+    }
+    flushed++;
+    if (workload_reported) {
+      break;
+    }
+  }
+  suppress_auto_delete = old_suppress_auto_delete;
+  return flushed;
 }
 void Sys::exitSimLoop(std::string msg) {
   if(id == 0 ){
@@ -1745,6 +1892,14 @@ Tick Sys::boostedTick() {
   return tick + offset;
 }
 void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
+  std::lock_guard<std::recursive_mutex> phase_lock(stream->phase_mutex);
+#ifdef NS3_MTP
+  if (stream->pending_receives.load(std::memory_order_acquire) != 0) {
+    stream->changeState(StreamState::Zombie);
+    return;
+  }
+#endif
+  stream->phase_generation.fetch_add(1, std::memory_order_acq_rel);
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
   NcclLog->writeLog(NcclLogLevel::DEBUG,"proceed_to_next_vnet_baseline :: phase1, stream->current_queue_id %d stream->phases_to_go.size %d",stream->current_queue_id,stream->phases_to_go.size());
   int previous_vnet = stream->current_queue_id;
@@ -1755,7 +1910,12 @@ void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
     stream->net_message_latency.back() /= stream->net_message_counter;
   }
   if (stream->my_current_phase.algorithm != nullptr) {
-    delete stream->my_current_phase.algorithm;
+    Algorithm* completed_algorithm = stream->my_current_phase.algorithm;
+    if (stream->phase_callback_depth > 0) {
+      stream->deferred_algorithm_deletes.push_back(completed_algorithm);
+    } else {
+      delete completed_algorithm;
+    }
   }
   if (stream->phases_to_go.size() == 0) {
     stream->take_bus_stats_average();
@@ -1786,7 +1946,11 @@ void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
     running_list.pop_front();
     #endif
     NcclLog->writeLog(NcclLogLevel::DEBUG,"proceed_to_next_vnet_baseline :: delete stream");
+#if defined(HTSIM_BACKEND) || defined(NS3_MTP) || defined(NS3_MPI)
+    stream->changeState(StreamState::Dead);
+#else
     delete stream;
+#endif
     return;
   }
   NcclLog->writeLog(NcclLogLevel::DEBUG,"proceed_to_next_vnet_baseline :: phase3");
@@ -1830,26 +1994,64 @@ void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
 }
 
 int Sys::drain_finished_streams() {
-  std::vector<StreamBaseline*> finished_streams;
   for (auto& queue_entry : active_Streams) {
     for (BaseStream* stream : queue_entry.second) {
       if (stream == nullptr) {
         continue;
       }
-      if (stream->phases_to_go.empty() &&
-          (stream->state == StreamState::Ready ||
-           stream->state == StreamState::Executing ||
-           stream->state == StreamState::Zombie)) {
-        finished_streams.push_back(static_cast<StreamBaseline*>(stream));
+      if (stream->state == StreamState::Zombie
+#ifdef NS3_MTP
+          && stream->pending_receives.load(std::memory_order_acquire) == 0
+#endif
+      ) {
+        proceed_to_next_vnet_baseline(static_cast<StreamBaseline*>(stream));
+        return 1;
       }
     }
   }
-
-  for (StreamBaseline* stream : finished_streams) {
-    proceed_to_next_vnet_baseline(stream);
-  }
-  return static_cast<int>(finished_streams.size());
+  return 0;
 }
+
+int Sys::start_ready_streams() {
+  for (auto& queue_entry : active_Streams) {
+    int& running_streams =
+        scheduler_unit->running_streams[queue_entry.first];
+    if (running_streams >= scheduler_unit->queue_threshold) {
+      continue;
+    }
+    for (BaseStream* stream : queue_entry.second) {
+      if (stream == nullptr) {
+        continue;
+      }
+      if (stream->phases_to_go.empty() &&
+          stream->state == StreamState::Ready &&
+          !stream->initialized) {
+        // This is a recovery path for a scheduler slot that became idle without
+        // initializing its next stream. Keep SchedulerUnit's slot accounting in
+        // sync; bypassing it can start two ring steps in the same single-slot
+        // queue and leave peer ranks posting receives for different steps.
+        running_streams++;
+        stream->init();
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+int Sys::schedule_ready_list_streams() {
+  int scheduled = 0;
+  while (!ready_list.empty()) {
+    size_t before = ready_list.size();
+    schedule(1);
+    if (ready_list.size() >= before) {
+      break;
+    }
+    scheduled++;
+  }
+  return scheduled;
+}
+
 void Sys::exiting() {}
 void Sys::insert_stream(std::list<BaseStream*>* queue, BaseStream* baseStream) {
   std::list<BaseStream*>::iterator it = queue->begin();
@@ -1931,8 +2133,179 @@ void Sys::insert_stream(std::list<BaseStream*>* queue, BaseStream* baseStream) {
 void Sys::register_for_finished_stream(Callable* callable) {
   registered_for_finished_stream_event.push_back(callable);
 }
+static const char* com_type_name(ComType type) {
+  switch (type) {
+    case ComType::None:
+      return "None";
+    case ComType::Reduce_Scatter:
+      return "ReduceScatter";
+    case ComType::All_Gather:
+      return "AllGather";
+    case ComType::All_Reduce:
+      return "AllReduce";
+    case ComType::All_to_All:
+      return "AllToAll";
+    case ComType::All_Reduce_All_to_All:
+      return "AllReduceAllToAll";
+    case ComType::All_Reduce_NVLS:
+      return "AllReduceNVLS";
+  }
+  return "Unknown";
+}
+
+static const char* stream_state_name(StreamState state) {
+  switch (state) {
+    case StreamState::Created:
+      return "Created";
+    case StreamState::Transferring:
+      return "Transferring";
+    case StreamState::Ready:
+      return "Ready";
+    case StreamState::Executing:
+      return "Executing";
+    case StreamState::Zombie:
+      return "Zombie";
+    case StreamState::Dead:
+      return "Dead";
+  }
+  return "Unknown";
+}
+
+size_t Sys::unfinished_stream_count() {
+  size_t count = ready_list.size() + event_queue.size() + pending_sends.size();
+  for (const auto& queue_entry : active_Streams) {
+    for (BaseStream* stream : queue_entry.second) {
+      if (stream != nullptr && stream->state != StreamState::Dead) {
+        count++;
+      }
+    }
+  }
+  if (streams_injected > streams_finished) {
+    count += streams_injected - streams_finished;
+  }
+  return count;
+}
+
+void Sys::dump_unfinished_streams(size_t limit) {
+  if (id != 0) {
+    return;
+  }
+  std::cout << "[ASTRA debug] unfinished streams snapshot: streams "
+            << streams_finished << "/" << streams_injected
+            << ", ready_list " << ready_list.size()
+            << ", total_running " << total_running_streams
+            << ", event_queue " << event_queue.size()
+            << ", pending_sends " << pending_sends.size() << std::endl;
+
+  size_t printed = 0;
+  for (auto& queue_entry : active_Streams) {
+    if (queue_entry.second.empty()) {
+      continue;
+    }
+    std::cout << "[ASTRA debug] queue " << queue_entry.first
+              << " active_streams " << queue_entry.second.size()
+              << std::endl;
+    for (BaseStream* stream : queue_entry.second) {
+      if (stream == nullptr) {
+        continue;
+      }
+      DataSet* dataset = stream->dataset;
+      std::cout << "[ASTRA debug]   stream " << stream->stream_num
+                << " state " << stream_state_name(stream->state)
+                << " com " << com_type_name(stream->current_com_type)
+                << " queue " << stream->current_queue_id
+                << " initialized " << stream->initialized
+                << " steps_finished " << stream->steps_finished
+                << " phases_left " << stream->phases_to_go.size()
+                << " data " << stream->my_current_phase.initial_data_size
+                << " age_ticks " << (Sys::boostedTick() - stream->creation_time)
+                << " phase_age_ticks "
+                << (Sys::boostedTick() - stream->last_phase_change);
+      if (dataset != nullptr) {
+        std::cout << " dataset " << dataset->my_id << " "
+                  << dataset->finished_streams << "/"
+                  << dataset->total_streams
+                  << " dataset_finished " << dataset->finished;
+      }
+      std::cout << std::endl;
+      printed++;
+      if (printed >= limit) {
+        std::cout << "[ASTRA debug]   ... truncated after " << limit
+                  << " streams" << std::endl;
+        return;
+      }
+    }
+  }
+  if (printed == 0) {
+    std::cout << "[ASTRA debug] no active streams found" << std::endl;
+  }
+}
+
 void Sys::increase_finished_streams(int amount) {
   streams_finished += amount;
+  if (id == 0 && streams_injected > 0) {
+    const char* progress_env = std::getenv("AS_STREAM_PROGRESS");
+    bool progress_enabled =
+        progress_env == nullptr || std::string(progress_env) != "0";
+    if (progress_enabled) {
+      using clock = std::chrono::steady_clock;
+      static auto start_time = clock::now();
+      static auto last_report_time = start_time;
+      static uint64_t start_finished = streams_finished;
+      static uint64_t last_report_percent_x100 = 0;
+
+      auto now = clock::now();
+      uint64_t percent_x100 =
+          streams_finished * 10000ULL / std::max<uint64_t>(streams_injected, 1);
+      bool enough_time =
+          std::chrono::duration_cast<std::chrono::seconds>(
+              now - last_report_time)
+              .count() >= 5;
+      bool has_unfinished_streams = streams_finished < streams_injected;
+      bool enough_progress =
+          has_unfinished_streams && percent_x100 >= last_report_percent_x100 + 100;
+      if (has_unfinished_streams && (enough_time || enough_progress)) {
+        double elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - start_time)
+                .count() /
+            1000.0;
+        double rate = elapsed > 0
+            ? (streams_finished - start_finished) / elapsed
+            : 0.0;
+        uint64_t remaining = streams_injected > streams_finished
+            ? streams_injected - streams_finished
+            : 0;
+        long long eta_seconds = rate > 0 ? (long long)(remaining / rate) : -1;
+
+        std::cout << "[ASTRA progress] streams " << streams_finished << "/"
+                  << streams_injected << " ("
+                  << (percent_x100 / 100) << "."
+                  << ((percent_x100 % 100) < 10 ? "0" : "")
+                  << (percent_x100 % 100) << "%), remaining " << remaining
+                  << ", rate " << rate << "/s";
+        if (eta_seconds >= 0) {
+          std::cout << ", ETA " << eta_seconds << "s";
+        } else {
+          std::cout << ", ETA unknown";
+        }
+        std::cout << ", sim_tick " << Sys::boostedTick()
+                  << ", event_queue " << event_queue.size()
+                  << ", pending_sends " << pending_sends.size() << std::endl;
+        const char* dump_env = std::getenv("AS_STREAM_DUMP");
+        if (dump_env != nullptr && std::string(dump_env) != "0") {
+          const char* dump_limit_env = std::getenv("AS_STREAM_DUMP_LIMIT");
+          size_t dump_limit = dump_limit_env == nullptr
+              ? 12
+              : std::max<size_t>(1, std::strtoull(dump_limit_env, nullptr, 10));
+          dump_unfinished_streams(dump_limit);
+        }
+
+        last_report_time = now;
+        last_report_percent_x100 = percent_x100;
+      }
+    }
+  }
   for (auto c : registered_for_finished_stream_event) {
     c->call(EventType::StreamsFinishedIncrease, nullptr);
   }
@@ -2092,7 +2465,53 @@ void Sys::handleEvent(void* arg) {
   } else if (event == EventType::PacketReceived) {
     RecvPacketEventHadndlerData* rcehd = (RecvPacketEventHadndlerData*)ehd;
     StreamBaseline* owner = static_cast<StreamBaseline*>(rcehd->owner);
+#ifdef NS3_MTP
+    auto release_pending_receive = [owner]() {
+      if (owner == nullptr) {
+        return false;
+      }
+      uint64_t pending =
+          owner->pending_receives.load(std::memory_order_acquire);
+      while (pending != 0) {
+        if (owner->pending_receives.compare_exchange_weak(
+                pending,
+                pending - 1,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+          return pending == 1;
+        }
+      }
+      return false;
+    };
+    auto resume_zombie_if_drained = [owner](bool drained) {
+      if (!drained) {
+        return;
+      }
+      std::lock_guard<std::recursive_mutex> lock(owner->phase_mutex);
+      if (owner->state == StreamState::Zombie) {
+        owner->owner->proceed_to_next_vnet_baseline(owner);
+      }
+    };
+#endif
+#if defined(HTSIM_BACKEND) || defined(NS3_MTP) || defined(NS3_MPI)
+    if (owner == nullptr || owner->state == StreamState::Dead ||
+        rcehd->phase_owner != owner->my_current_phase.algorithm ||
+        rcehd->phase_generation !=
+            owner->phase_generation.load(std::memory_order_acquire)) {
+#ifdef NS3_MTP
+      resume_zombie_if_drained(release_pending_receive());
+#endif
+      delete rcehd;
+      return;
+    }
+#endif
+#ifdef NS3_MTP
+    bool receive_queue_drained = release_pending_receive();
+#endif
     owner->consume(rcehd);
+#ifdef NS3_MTP
+    resume_zombie_if_drained(receive_queue_drained);
+#endif
     delete rcehd;
   } else if (event == EventType::PacketSent) {
     SendPacketEventHandlerData* sendhd = (SendPacketEventHandlerData*)ehd;
@@ -2125,7 +2544,7 @@ void Sys::handleEvent(void* arg) {
       if(node->event_queue.find(Sys::boostedTick())==node->event_queue.end())
         if ((node->finished_workloads == 1 && node->event_queue.size() == 0 && node->pending_sends.size() == 0) ||
       node->initialized == false) {
-#if !defined(NS3_MTP) && !defined(NS3_MPI)
+#if !defined(NS3_MTP) && !defined(NS3_MPI) && !defined(HTSIM_BACKEND)
         delete node;
 #endif
       }
@@ -2156,8 +2575,19 @@ void Sys::handleEvent(void* arg) {
     SEND_HANDLER_END: delete sendhd;
   }else if(event==EventType::PacketSentFinshed){
     AstraSim::SendPacketEventHandlerData* ehd = (AstraSim::SendPacketEventHandlerData*) arg;
-    if(ehd->owner!=nullptr)
+    if(ehd->owner!=nullptr) {
+#if defined(HTSIM_BACKEND) || defined(NS3_MTP) || defined(NS3_MPI)
+      if (ehd->owner->state == StreamState::Dead ||
+          ehd->phase_owner != ehd->owner->my_current_phase.algorithm ||
+          ehd->phase_generation !=
+              ehd->owner->phase_generation.load(std::memory_order_acquire)) {
+        delete ehd;
+        return;
+      }
+#endif
       ehd->owner->sendcallback(ehd);
+    }
+    delete ehd;
   }
 }
 

@@ -106,39 +106,39 @@ namespace MockNccl {
       std::set<int> EPnodes;
       for (int i = 0; i < TP_nums / _EP_size; i++){
         TP_idx = i*_EP_size;
-        for(int j =0;j<_EP_size;j++){
-          for(int k = 0;k<AllTPGroups[TP_idx].Ranks.size();k++){
-            ranks.clear();
-            EPnodes.clear();
-            for(int l = TP_idx;l<TP_idx+_EP_size;l++){
-              int tmp_rank = AllTPGroups[l].Ranks[k];
-              int node_idx = tmp_rank/_gpus_per_nodes;
-              ranks.push_back(tmp_rank);
-              GroupIndex[std::make_pair(tmp_rank, EP)] = all_group_idx;
-              EPnodes.insert(node_idx);
-            }
-            NVSwitchs.clear();
-            for(int idx:EPnodes){
-              NVSwitchs.push_back(_NVSwitch[idx]);
-              GroupIndex[std::make_pair(_NVSwitch[idx],EP)] = all_group_idx;
-            }
-            AllGroups[all_group_idx] = GroupInfo(all_group_idx,EP,EPnodes.size(),_EP_size,ranks,NVSwitchs);
-            all_group_idx++;
+        for(int k = 0;k<AllTPGroups[TP_idx].Ranks.size();k++){
+          ranks.clear();
+          EPnodes.clear();
+          for(int l = TP_idx;l<TP_idx+_EP_size;l++){
+            int tmp_rank = AllTPGroups[l].Ranks[k];
+            int node_idx = tmp_rank/_gpus_per_nodes;
+            ranks.push_back(tmp_rank);
+            GroupIndex[std::make_pair(tmp_rank, EP)] = all_group_idx;
+            EPnodes.insert(node_idx);
           }
+          NVSwitchs.clear();
+          for(int idx:EPnodes){
+            NVSwitchs.push_back(_NVSwitch[idx]);
+            GroupIndex[std::make_pair(_NVSwitch[idx],EP)] = all_group_idx;
+          }
+          AllGroups[all_group_idx] = GroupInfo(all_group_idx,EP,EPnodes.size(),_EP_size,ranks,NVSwitchs);
+          all_group_idx++;
         }
       }
     }
     //init EP_DP
     if (_DP_EP_size > 1){
-      int TP_idx = 0;
       std::set<int> DP_EP_nodes;
-      for (int i = 0; i < TP_nums / _DP_EP_size; i++){
-        TP_idx = i;
-        for (int j = 0; j < _DP_EP_size; j++){
+      int dp_ep_block_size = _DP_EP_size * _EP_size;
+      for (int i = 0; i < TP_nums / dp_ep_block_size; i++){
+        int block_start = i * dp_ep_block_size;
+        int block_end = block_start + dp_ep_block_size;
+        for (int j = 0; j < _EP_size; j++){
+          int TP_idx = block_start + j;
           for (int k = 0; k < AllTPGroups[TP_idx].Ranks.size(); k++){
             ranks.clear();
             DP_EP_nodes.clear();
-            for (int l = TP_idx; l < TP_idx + _DP_EP_size * _EP_size; l += _EP_size){
+            for (int l = TP_idx; l < block_end; l += _EP_size){
               int tmp_rank = AllTPGroups[l].Ranks[k];
               int node_idx = tmp_rank / _gpus_per_nodes;
               ranks.push_back(tmp_rank);
@@ -279,6 +279,7 @@ namespace MockNccl {
   }
   
   std::shared_ptr<void> MockNcclGroup::getFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size,int layer_num,State loopstate){
+    std::lock_guard<std::mutex> lock(flow_models_mutex);
     std::string flow_model_name;
     GroupInfo gp_info;
     int gp_idx;
@@ -317,7 +318,24 @@ namespace MockNccl {
       }
       return presult;
     } else {
+      int first_flow_id = g_flow_id;
       flow_models[flow_model_name] = genFlowModels(type,rank,op,data_size);
+      const char* target_flow_env = std::getenv("AS_NCCL_FLOW_ID_DIAG");
+      if (target_flow_env != nullptr) {
+        char* end = nullptr;
+        long target_flow_id = std::strtol(target_flow_env, &end, 10);
+        if (end != target_flow_env && *end == '\0' &&
+            target_flow_id >= first_flow_id && target_flow_id < g_flow_id) {
+          std::cerr << "[NCCL flow id diag] target=" << target_flow_id
+                    << " range=[" << first_flow_id << "," << g_flow_id << ")"
+                    << " group=" << flow_model_name
+                    << " rank=" << rank
+                    << " layer=" << layer_num
+                    << " state=" << static_cast<int>(loopstate)
+                    << " op=" << static_cast<int>(op)
+                    << " bytes=" << data_size << std::endl;
+        }
+      }
       FlowName2nums[flow_model_name]= 1;
       return flow_models[flow_model_name][rank];
     }
@@ -1714,6 +1732,53 @@ namespace MockNccl {
     for(auto it = rank2flowmodels.begin();it!=rank2flowmodels.end();it++){
       rank2pflowmodels[it->first] = std::make_shared<FlowModels>(it->second);
     }
+#ifdef NS3_MTP
+    size_t invalid_links = 0;
+    for (const auto& entry : result) {
+      const auto& flow = entry.second;
+      for (size_t i = 0; i < flow.parent_flow_id.size(); ++i) {
+        auto parent = result.find(
+            std::make_pair(entry.first.first, flow.parent_flow_id[i]));
+        bool valid = parent != result.end() &&
+            i < flow.prev.size() &&
+            parent->second.src == flow.prev[i] &&
+            parent->second.dest == flow.src &&
+            parent->second.chunk_id + 1 == flow.chunk_id;
+        if (!valid) {
+          if (invalid_links < 16) {
+            std::cerr << "[NS3 flow map invalid] ring=" << entry.first.first
+                      << " flow=" << flow.flow_id
+                      << " edge=" << flow.src << "->" << flow.dest
+                      << " chunk=" << flow.chunk_id
+                      << " parent=" << flow.parent_flow_id[i]
+                      << " prev=" << (i < flow.prev.size() ? flow.prev[i] : -1)
+                      << std::endl;
+          }
+          ++invalid_links;
+        }
+      }
+      for (int child_id : flow.child_flow_id) {
+        auto child = result.find(std::make_pair(entry.first.first, child_id));
+        bool reciprocal = child != result.end() &&
+            std::find(child->second.parent_flow_id.begin(),
+                      child->second.parent_flow_id.end(), flow.flow_id) !=
+                child->second.parent_flow_id.end();
+        if (!reciprocal) {
+          if (invalid_links < 16) {
+            std::cerr << "[NS3 flow map invalid child] ring="
+                      << entry.first.first << " flow=" << flow.flow_id
+                      << " child=" << child_id << std::endl;
+          }
+          ++invalid_links;
+        }
+      }
+    }
+    if (invalid_links != 0) {
+      std::cerr << "[NS3 flow map invalid] total=" << invalid_links
+                << " rank=" << rank << " data_size=" << data_size
+                << std::endl;
+    }
+#endif
     return rank2pflowmodels;
   }
   

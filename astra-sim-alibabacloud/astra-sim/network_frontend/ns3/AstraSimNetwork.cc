@@ -24,8 +24,10 @@
 #include "ns3/internet-module.h"
 #include "ns3/network-module.h"
 #include "entry.h"
+#include <algorithm>
 #include <execinfo.h>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <queue>
 #include <cstdlib>
@@ -50,10 +52,17 @@
 using namespace std;
 using namespace ns3;
 
-extern std::map<std::pair<std::pair<int, int>,int>, AstraSim::ncclFlowTag> receiver_pending_queue;
+extern std::map<ReceiverPendingKey, ReceiverPendingArrivals>
+    receiver_pending_queue;
 extern uint32_t node_num, switch_num, link_num, trace_num, nvswitch_num, gpus_per_server;
 extern GPUType gpu_type;
 extern std::vector<int>NVswitchs;
+
+int ns3_treeflow_tag(
+    const AstraSim::ncclFlowTag& flow_tag,
+    int api_tag) {
+  return flow_tag.tag_id < 0 ? api_tag : flow_tag.tag_id;
+}
 
 struct sim_event {
   void *buffer;
@@ -115,7 +124,12 @@ public:
     t.fun_arg = fun_arg;
     t.msg_handler = fun_ptr;
     t.schTime = delta.time_val;
+#ifdef NS3_MTP
+    Simulator::ScheduleWithContext(
+        rank, NanoSeconds(t.schTime), t.msg_handler, t.fun_arg);
+#else
     Simulator::Schedule(NanoSeconds(t.schTime), t.msg_handler, t.fun_arg);
+#endif
     return;
   }
   virtual int sim_send(void *buffer,   
@@ -133,16 +147,21 @@ public:
     t.type = 0;
     t.fun_arg = fun_arg;
     t.msg_handler = msg_handler;
+    int network_tag;
     {
       #ifdef NS3_MTP
       MtpInterface::explicitCriticalSection cs;
       #endif
-      sentHash[make_pair(tag, make_pair(t.src, t.dest))] = t;
+      network_tag = ns3_treeflow_tag(request->flowTag, tag);
+      if (request->flowTag.tag_id >= 0) {
+        request->flowTag.tag_id = network_tag;
+      }
+      sentHash[make_pair(network_tag, make_pair(t.src, t.dest))] = t;
       #ifdef NS3_MTP
       cs.ExitSection();
       #endif
     }
-    SendFlow(rank, dst, count, msg_handler, fun_arg, tag, request);
+    SendFlow(rank, dst, count, msg_handler, fun_arg, network_tag, request);
     return 0;
   }
   virtual int sim_recv(void *buffer, uint64_t count, int type, int src, int tag,
@@ -162,56 +181,56 @@ public:
     t.fun_arg = fun_arg;
     t.msg_handler = msg_handler;
     AstraSim::RecvPacketEventHadndlerData* ehd = (AstraSim::RecvPacketEventHadndlerData*) t.fun_arg;
+#ifdef NS3_MTP
+    if (ehd != nullptr && ehd->owner != nullptr) {
+      ehd->owner->pending_receives.fetch_add(1, std::memory_order_acq_rel);
+    }
+#endif
     AstraSim::EventType event = ehd->event;
-    tag = ehd->flowTag.tag_id;
+    tag = ns3_treeflow_tag(ehd->flowTag, tag);
+    if (ehd->flowTag.tag_id >= 0) {
+      ehd->flowTag.tag_id = tag;
+    }
     NcclLog->writeLog(NcclLogLevel::DEBUG,"[Receive event registration] src %d sim_recv on rank %d tag_id %d channdl id %d",src,rank,tag,ehd->flowTag.channel_id);
     
-    if (recvHash.find(make_pair(tag, make_pair(t.src, t.dest))) !=
-        recvHash.end()) {
-      uint64_t count = recvHash[make_pair(tag, make_pair(t.src, t.dest))];
-      if (count == t.count) {
-        recvHash.erase(make_pair(tag, make_pair(t.src, t.dest)));
-        assert(ehd->flowTag.child_flow_id == -1 && ehd->flowTag.current_flow_id == -1);
-        if(receiver_pending_queue.count(std::make_pair(std::make_pair(rank, src),tag))!= 0) {
-          AstraSim::ncclFlowTag pending_tag = receiver_pending_queue[std::make_pair(std::make_pair(rank, src),tag)];
-          receiver_pending_queue.erase(std::make_pair(std::make_pair(rank,src),tag));
-          ehd->flowTag = pending_tag;
-        } 
+    auto recv_key = make_pair(tag, make_pair(t.src, t.dest));
+    auto arrived = recvHash.find(recv_key);
+    auto pending = receiver_pending_queue.find(
+        make_pair(make_pair(t.dest, t.src), tag));
+    bool exact_arrival_compatible =
+        arrived != recvHash.end() &&
+        pending != receiver_pending_queue.end() &&
+        !pending->second.empty();
+    if (exact_arrival_compatible) {
+      uint64_t arrived_count = arrived->second;
+      AstraSim::ncclFlowTag pending_tag;
+      uint64_t consumed_count = std::min(arrived_count, t.count);
+      if (!consume_receiver_pending_arrival(
+              t.src,
+              t.dest,
+              tag,
+              consumed_count,
+              pending_tag)) {
+        enqueue_expected_receive(recv_key, t);
         #ifdef NS3_MTP
         cs.ExitSection();
         #endif
-        t.msg_handler(t.fun_arg);
         goto sim_recv_end_section;
-      } else if (count > t.count) {
-        recvHash[make_pair(tag, make_pair(t.src, t.dest))] = count - t.count;
-        assert(ehd->flowTag.child_flow_id == -1 && ehd->flowTag.current_flow_id == -1);
-        if(receiver_pending_queue.count(std::make_pair(std::make_pair(rank, src),tag))!= 0) {
-          AstraSim::ncclFlowTag pending_tag = receiver_pending_queue[std::make_pair(std::make_pair(rank, src),tag)];
-          receiver_pending_queue.erase(std::make_pair(std::make_pair(rank,src),tag));
-          ehd->flowTag = pending_tag;
-        } 
-        #ifdef NS3_MTP
-        cs.ExitSection();
-        #endif
-        t.msg_handler(t.fun_arg);
-        goto sim_recv_end_section;
-      } else {
-        recvHash.erase(make_pair(tag, make_pair(t.src, t.dest)));
-        t.count -= count;
-        expeRecvHash[make_pair(tag, make_pair(t.src, t.dest))] = t;
       }
+      if (arrived_count >= t.count) {
+        assert(ehd->flowTag.child_flow_id == -1 && ehd->flowTag.current_flow_id == -1);
+        ehd->flowTag = pending_tag;
+        #ifdef NS3_MTP
+        cs.ExitSection();
+        #endif
+        dispatch_receiver_callback(t);
+        goto sim_recv_end_section;
+      }
+      t.count -= arrived_count;
+      enqueue_expected_receive(recv_key, t);
     } else {
-      if (expeRecvHash.find(make_pair(tag, make_pair(t.src, t.dest))) ==
-          expeRecvHash.end()) {
-        expeRecvHash[make_pair(tag, make_pair(t.src, t.dest))] = t;
-          NcclLog->writeLog(NcclLogLevel::DEBUG," [Packet arrived late, registering first] recvHash do not find expeRecvHash.new make src  %d dest  %d t.count:  %llu channel_id  %d current_flow_id  %d",t.src,t.dest,t.count,tag,flowTag.current_flow_id);
-          
-      } else {
-        uint64_t expecount =
-            expeRecvHash[make_pair(tag, make_pair(t.src, t.dest))].count;
-          NcclLog->writeLog(NcclLogLevel::DEBUG," [Packet arrived late, re-registering] recvHash do not find expeRecvHash.add make src  %d dest  %d expecount:  %d t.count:  %d tag_id  %d current_flow_id  %d",t.src,t.dest,expecount,t.count,tag,flowTag.current_flow_id);
-          
-      }
+      enqueue_expected_receive(recv_key, t);
+      NcclLog->writeLog(NcclLogLevel::DEBUG," [Packet arrived late, registering] recvHash do not find expeRecvHash.push make src  %d dest  %d t.count:  %llu channel_id  %d current_flow_id  %d",t.src,t.dest,t.count,tag,flowTag.current_flow_id);
     }
     #ifdef NS3_MTP
     cs.ExitSection();
@@ -311,8 +330,8 @@ int main(int argc, char *argv[]) {
   #endif
   
   main1(user_param.network_topo,user_param.network_conf);
-  int nodes_num = node_num - switch_num;
   int gpu_num = node_num - nvswitch_num - switch_num;
+  int nodes_num = gpu_num;
 
   std::map<int, int> node2nvswitch; 
   for(int i = 0; i < gpu_num; ++ i) {
@@ -339,7 +358,7 @@ int main(int argc, char *argv[]) {
         j,                        
         0,               
         1,                        
-        {nodes_num},        
+        {gpu_num},
         {1},          
         "", 
         user_param.workload, 
@@ -358,7 +377,7 @@ int main(int argc, char *argv[]) {
         gpus_per_server
     );
     systems[j ]->nvswitch_id = node2nvswitch[j];
-    systems[j ]->num_gpus = nodes_num - nvswitch_num;
+    systems[j ]->num_gpus = gpu_num;
   }
   for (int i = 0; i < nodes_num; i++) {
     systems[i]->workload->fire();
@@ -367,45 +386,256 @@ int main(int argc, char *argv[]) {
 
   // Stop time must be configured before Run().
   Simulator::Stop(Seconds(2000000000));
-  while (true) {
-    Simulator::Run();
-
-    bool made_progress = false;
-    while (true) {
-      int drained_streams = 0;
-      int flushed_events = 0;
+  auto simulation_complete = [&systems]() {
+    if (systems.empty() || systems[0] == nullptr ||
+        !systems[0]->workload_reported) {
+      return false;
+    }
+    bool network_idle = false;
+    {
+      #ifdef NS3_MTP
+      MtpInterface::explicitCriticalSection cs;
+      #endif
+      network_idle = sender_src_port_map.empty() &&
+          receiver_src_port_map.empty() &&
+          sentHash.empty() &&
+          waiting_to_sent_callback.empty() &&
+          waiting_to_notify_receiver.empty() &&
+          recvHash.empty() &&
+          expeRecvHash.empty() &&
+          receiver_pending_queue.empty();
+      #ifdef NS3_MTP
+      cs.ExitSection();
+      #endif
+    }
+    if (!network_idle) {
+      return false;
+    }
+    return std::all_of(
+        systems.begin(), systems.end(), [](const AstraSim::Sys* system) {
+          return system != nullptr &&
+              system->streams_finished == system->streams_injected &&
+              system->total_running_streams == 0;
+        });
+  };
+  auto run_in_system_context = [](
+                                   AstraSim::Sys* system,
+                                   const std::function<int()>& action) {
+    #ifdef NS3_MTP
+    auto* previous_system = MtpInterface::GetSystem();
+    uint32_t previous_system_id = previous_system == nullptr
+        ? 0
+        : previous_system->GetSystemId();
+    uint32_t target_system_id =
+        NodeList::GetNode(system->id)->GetSystemId();
+    MtpInterface::SetSystem(target_system_id);
+    int result = action();
+    MtpInterface::SetSystem(previous_system_id);
+    return result;
+    #else
+    return action();
+    #endif
+  };
+  std::atomic<int> maintenance_pending{0};
+  std::atomic<int> maintenance_drained{0};
+  std::atomic<int> maintenance_scheduled{0};
+  std::atomic<int> maintenance_started{0};
+  std::function<void()> final_drain_pump;
+  final_drain_pump = [
+                         &systems,
+                         &simulation_complete,
+                         &maintenance_pending,
+                         &maintenance_drained,
+                         &maintenance_scheduled,
+                         &maintenance_started,
+                         &final_drain_pump]() {
+    if (simulation_complete()) {
+      Simulator::Stop();
+      return;
+    }
+    bool waiting_for_final_streams = !systems.empty() &&
+        systems[0] != nullptr && systems[0]->workload != nullptr &&
+        systems[0]->workload->current_state ==
+            AstraSim::Workload::LoopState::Wait_For_Sim_Finish;
+    static std::tuple<size_t, size_t, size_t> last_reconcile_snapshot =
+        std::make_tuple(
+            static_cast<size_t>(-1),
+            static_cast<size_t>(-1),
+            static_cast<size_t>(-1));
+    bool network_quiescent = false;
+    std::tuple<size_t, size_t, size_t> reconcile_snapshot;
+    {
+      #ifdef NS3_MTP
+      MtpInterface::explicitCriticalSection cs;
+      #endif
+      network_quiescent = sender_src_port_map.empty() &&
+          receiver_src_port_map.empty() &&
+          waiting_to_notify_receiver.empty();
+      reconcile_snapshot = std::make_tuple(
+          recvHash.size(),
+          expected_receive_count(),
+          receiver_pending_queue.size());
+      #ifdef NS3_MTP
+      cs.ExitSection();
+      #endif
+    }
+    int reconciled_receives = 0;
+    if (network_quiescent &&
+        reconcile_snapshot != last_reconcile_snapshot) {
+      last_reconcile_snapshot = reconcile_snapshot;
+      reconciled_receives = reconcile_pending_receives();
+    }
+    int drained_streams = maintenance_drained.exchange(0);
+    int scheduled_streams = maintenance_scheduled.exchange(0);
+    int started_streams = maintenance_started.exchange(0);
+    if (waiting_for_final_streams && network_quiescent &&
+        maintenance_pending.load() == 0) {
+      int action_count = static_cast<int>(std::count_if(
+          systems.begin(), systems.end(), [](const AstraSim::Sys* system) {
+            return system != nullptr;
+          }));
+      maintenance_pending.store(action_count);
       for (auto* system : systems) {
-        if (system != nullptr) {
-          drained_streams += system->drain_finished_streams();
+        if (system == nullptr) {
+          continue;
         }
-      }
-      if (drained_streams > 0) {
-        made_progress = true;
-        std::cout << "[NS3] Drained " << drained_streams
-                  << " finished streams after simulator event queue became empty"
-                  << std::endl;
-      }
-      for (auto* system : systems) {
-        if (system != nullptr &&
-            system->event_queue.find(AstraSim::Sys::boostedTick()) != system->event_queue.end()) {
-          system->call_events();
-          flushed_events++;
-        }
-      }
-      if (flushed_events > 0) {
-        made_progress = true;
-        std::cout << "[NS3] Flushed " << flushed_events
-                  << " ASTRA event queues after final stream drain"
-                  << std::endl;
-      }
-      if (drained_streams == 0 && flushed_events == 0) {
-        break;
+        Simulator::ScheduleWithContext(
+            system->id,
+            NanoSeconds(0),
+            [system,
+             &maintenance_pending,
+             &maintenance_drained,
+             &maintenance_scheduled,
+             &maintenance_started]() {
+              maintenance_drained.fetch_add(
+                  system->drain_finished_streams());
+              maintenance_scheduled.fetch_add(
+                  system->schedule_ready_list_streams());
+              maintenance_started.fetch_add(system->start_ready_streams());
+              maintenance_pending.fetch_sub(1);
+            });
       }
     }
-    if (!made_progress) {
+    int progressed_streams =
+        reconciled_receives + drained_streams + scheduled_streams +
+        started_streams;
+    static int stagnant_pumps = 0;
+    if (waiting_for_final_streams && network_quiescent &&
+        progressed_streams == 0) {
+      stagnant_pumps++;
+      if (stagnant_pumps == 1000) {
+        std::cerr << "[NS3] Final drain pending receive snapshot"
+                  << std::endl;
+        dump_active_qps(12);
+        dump_receive_mismatch(12);
+      }
+    } else {
+      stagnant_pumps = 0;
+    }
+    if (progressed_streams > 0) {
+      std::cout << "[NS3] "
+                << (waiting_for_final_streams ? "Final drain" : "Recovery")
+                << " pump: reconciled " << reconciled_receives
+                << ", drained " << drained_streams
+                << ", scheduled " << scheduled_streams
+                << ", started " << started_streams << std::endl;
+    }
+    if (simulation_complete()) {
+      Simulator::Stop();
+      return;
+    }
+    if (progressed_streams > 0) {
+      Simulator::Schedule(MicroSeconds(100), final_drain_pump);
+    } else if (!network_quiescent) {
+      Simulator::Schedule(MilliSeconds(10), final_drain_pump);
+    } else {
+      // Maintenance callbacks scheduled above run after this pump. Keep one
+      // follow-up event alive so their completed state can stop the simulator.
+      Simulator::Schedule(MicroSeconds(100), final_drain_pump);
+    }
+  };
+  Simulator::Schedule(MilliSeconds(10), final_drain_pump);
+  bool final_drain_failed = false;
+  Simulator::Run();
+  while (!simulation_complete()) {
+    int reconciled_receives = reconcile_pending_receives();
+    if (reconciled_receives > 0) {
+      std::cout << "[NS3] Reconciled " << reconciled_receives
+                << " pending receives after simulator event queue became empty"
+                << std::endl;
+      Simulator::Run();
+      continue;
+    }
+    int drained_streams = 0;
+    int scheduled_streams = 0;
+    int started_streams = 0;
+    for (auto* system : systems) {
+      if (system != nullptr) {
+        drained_streams += run_in_system_context(system, [system]() {
+          return system->drain_finished_streams();
+        });
+      }
+    }
+    if (drained_streams > 0) {
+      std::cout << "[NS3] Drained " << drained_streams
+                << " finished streams after simulator event queue became empty"
+                << std::endl;
+      Simulator::Run();
+    }
+    for (auto* system : systems) {
+      if (system != nullptr) {
+        scheduled_streams += run_in_system_context(system, [system]() {
+          return system->schedule_ready_list_streams();
+        });
+      }
+    }
+    if (scheduled_streams > 0) {
+      std::cout << "[NS3] Scheduled " << scheduled_streams
+                << " ready-list streams after simulator event queue became empty"
+                << std::endl;
+      Simulator::Run();
+    }
+    for (auto* system : systems) {
+      if (system != nullptr) {
+        started_streams += run_in_system_context(system, [system]() {
+          return system->start_ready_streams();
+        });
+      }
+    }
+    if (started_streams > 0) {
+      std::cout << "[NS3] Started " << started_streams
+                << " ready streams after simulator event queue became empty"
+                << std::endl;
+      Simulator::Run();
+    }
+    if (simulation_complete()) {
+      break;
+    }
+    if (drained_streams == 0 && scheduled_streams == 0 &&
+        started_streams == 0) {
+      std::cerr << "[NS3] Final drain stalled before workload report"
+                << std::endl;
+      dump_active_qps(12);
+      dump_receive_mismatch(12);
+      if (!systems.empty() && systems[0] != nullptr) {
+        systems[0]->dump_unfinished_streams(12);
+      }
+      final_drain_failed = true;
       break;
     }
   }
+
+  std::cout << "[NS3 flow accounting] receiver_notifications="
+            << receiver_notified_logical_flows.size()
+            << " receiver_callbacks="
+            << receiver_callbacks_dispatched.load(std::memory_order_relaxed)
+            << " sender_callbacks="
+            << sender_callbacks_dispatched.load(std::memory_order_relaxed)
+            << " sender_active=" << sender_src_port_map.size()
+            << " receiver_active=" << receiver_src_port_map.size()
+            << " receiver_waiting=" << waiting_to_notify_receiver.size()
+            << " recv_pending=" << recvHash.size()
+            << " expected_pending=" << expected_receive_count() << std::endl;
 
   Simulator::Destroy();
   ns3_print_pxn_summary();
@@ -418,5 +648,5 @@ int main(int argc, char *argv[]) {
   #ifdef NS3_MPI
   MpiInterface::Disable ();
   #endif
-  return 0;
+  return final_drain_failed ? 2 : 0;
 }

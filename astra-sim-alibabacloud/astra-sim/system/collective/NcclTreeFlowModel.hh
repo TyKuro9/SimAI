@@ -48,6 +48,9 @@ class NcclTreeFlowModel : public Algorithm {
   std::map<int, int> _stream_count; 
   std::atomic<int> send_packets;
   std::atomic<int> recv_packets;
+#ifdef NS3_MTP
+  std::set<std::tuple<int, int, int>> posted_receive_tags;
+#endif
   int parallel_reduce;
   std::map<std::pair<int, int>, std::list<MyPacket>> packets; 
   bool toggle;
@@ -85,10 +88,23 @@ class NcclTreeFlowModel : public Algorithm {
       int treechannels);
   virtual void run(EventType event, CallData* data);
   void process_stream_count(int channel_id);
-  void release_packets(int channel_id, int flow_id, uint64_t message_size);
+  void release_packets(
+      int channel_id,
+      int flow_id,
+      uint64_t message_size,
+      bool packet_npu_to_ma,
+      bool packet_processed,
+      bool packet_send_back);
   void reduce(int channel_id, int flow_id);
   bool iteratable(int channel_id);
   virtual int get_non_zero_latency_packets();
+  int tag_id_for_flow(
+      const MockNccl::SingleFlow& flow_model,
+      bool receive) const;
+  int tag_id_for_receive_from(
+      const MockNccl::SingleFlow& flow_model,
+      int recv_prev) const;
+  std::vector<int> acceptable_flow_ids_for_channel(int channel_id) const;
   void insert_packets(int channel_id, int flow_id);
   void init_indegree_mapping();
   bool ready(int channel_id, int flow_id);
@@ -104,20 +120,31 @@ class NcclTreeFlowModel : public Algorithm {
   {
   public:
     inline FlowCriticalSection ()
+        : active(true)
     {
       while (g_flow_inCriticalSection.exchange (true, std::memory_order_acquire))
         ;
     }
 
+    FlowCriticalSection(const FlowCriticalSection&) = delete;
+    FlowCriticalSection& operator=(const FlowCriticalSection&) = delete;
+
     inline void ExitSection() 
     {
+      if (!active) {
+        return;
+      }
+      active = false;
         g_flow_inCriticalSection.store (false, std::memory_order_release);
     }
 
     inline ~FlowCriticalSection ()
     {
-      g_flow_inCriticalSection.store (false, std::memory_order_release);
+      ExitSection();
     }
+
+  private:
+    bool active;
   };
   static std::atomic<bool> g_flow_inCriticalSection;
 

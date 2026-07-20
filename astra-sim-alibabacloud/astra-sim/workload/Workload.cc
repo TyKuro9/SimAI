@@ -185,6 +185,10 @@ void Workload::report() {
   std::cout << "all passes finished at time: " << Sys::boostedTick()
             << ", id of first layer: " << layers[0]->id << std::endl;
   generator->NI->pass_front_end_report(astraSimDataAPI);
+#if defined(NS3_MTP) || defined(NS3_MPI) || defined(HTSIM_BACKEND)
+  generator->workload_reported = true;
+  return;
+#endif
   #ifdef NS3_MTP 
   if (this->seprate_log) {
     std::list<std::list<std::pair<uint64_t, double>>> dims;
@@ -211,6 +215,14 @@ void Workload::check_for_sim_end() {
     current_state = LoopState::Wait_For_Sim_Finish;
     if (generator->streams_finished != generator->streams_injected &&
         registered_for_finished_streams == false) {
+      if (generator->id == 0) {
+        std::cout << "[ASTRA progress] pass finished; waiting for streams "
+                  << generator->streams_finished << "/"
+                  << generator->streams_injected << ", event_queue "
+                  << generator->event_queue.size() << ", pending_sends "
+                  << generator->pending_sends.size() << std::endl;
+        generator->dump_unfinished_streams(12);
+      }
       generator->register_for_finished_stream(this);
       registered_for_finished_streams = true;
       layers[0]->is_weight_grad_comm_finished_blocking();

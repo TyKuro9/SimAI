@@ -34,6 +34,8 @@ class PacketBundle : public Callable {
   uint64_t size;
   Sys* generator;
   BaseStream* stream;
+  const void* phase_owner;
+  uint64_t phase_generation;
   Tick creation_time;
   MemBus::Transmition transmition;
   int channel_id;

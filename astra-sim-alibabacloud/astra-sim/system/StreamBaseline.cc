@@ -7,6 +7,29 @@ LICENSE file in the root directory of this source tree.
 #include "MockNcclLog.h"
 #include "astra-sim/system/collective/Algorithm.hh"
 namespace AstraSim {
+namespace {
+class PhaseCallbackGuard {
+ public:
+  explicit PhaseCallbackGuard(BaseStream* stream) : stream_(stream) {
+    stream_->phase_callback_depth++;
+  }
+
+  ~PhaseCallbackGuard() {
+    stream_->phase_callback_depth--;
+    if (stream_->phase_callback_depth != 0) {
+      return;
+    }
+    for (Algorithm* algorithm : stream_->deferred_algorithm_deletes) {
+      delete algorithm;
+    }
+    stream_->deferred_algorithm_deletes.clear();
+  }
+
+ private:
+  BaseStream* stream_;
+};
+} // namespace
+
 StreamBaseline::StreamBaseline(
     Sys* owner,
     DataSet* dataset,
@@ -23,6 +46,8 @@ StreamBaseline::StreamBaseline(
   initial_data_size = phases_to_go.front().initial_data_size;
 }
 void StreamBaseline::init() {
+  std::lock_guard<std::recursive_mutex> lock(phase_mutex);
+  PhaseCallbackGuard callback_guard(this);
   initialized = true;
   last_init = Sys::boostedTick();
   if (!my_current_phase.enabled) {
@@ -38,6 +63,8 @@ void StreamBaseline::init() {
   total_packets_sent = 1;
 }
 void StreamBaseline::call(EventType event, CallData* data) {
+  std::lock_guard<std::recursive_mutex> lock(phase_mutex);
+  PhaseCallbackGuard callback_guard(this);
   if (event == EventType::WaitForVnetTurn) {
     owner->proceed_to_next_vnet_baseline(this);
     return;
@@ -57,12 +84,26 @@ void StreamBaseline::call(EventType event, CallData* data) {
   }
 }
 void StreamBaseline::consume(RecvPacketEventHadndlerData* message) {
+  std::lock_guard<std::recursive_mutex> lock(phase_mutex);
+  if (message->phase_generation !=
+          phase_generation.load(std::memory_order_acquire) ||
+      message->phase_owner != my_current_phase.algorithm) {
+    return;
+  }
+  PhaseCallbackGuard callback_guard(this);
   net_message_latency.back() +=
       Sys::boostedTick() - message->ready_time; 
   net_message_counter++;
   my_current_phase.algorithm->run(EventType::PacketReceived, message);
 }
 void StreamBaseline::sendcallback(SendPacketEventHandlerData* messages){
+  std::lock_guard<std::recursive_mutex> lock(phase_mutex);
+  if (messages->phase_generation !=
+          phase_generation.load(std::memory_order_acquire) ||
+      messages->phase_owner != my_current_phase.algorithm) {
+    return;
+  }
+  PhaseCallbackGuard callback_guard(this);
   if(my_current_phase.algorithm!=nullptr)
     my_current_phase.algorithm->run(EventType::PacketSentFinshed,messages);
 }
