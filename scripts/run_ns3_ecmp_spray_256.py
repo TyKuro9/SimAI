@@ -114,6 +114,16 @@ FLOWLET_SUMMARY_RE = re.compile(
 )
 
 PATH_SUMMARY_RE = re.compile(r"\[NS3 PATH SUMMARY\](?P<fields>[^\r\n]+)")
+PACKET_DLB_DETAIL_RE = re.compile(
+    r"\[NS3 PACKET DLB SUMMARY\][^\r\n]* "
+    r"reordered_packets=(?P<reordered_packets>\d+) "
+    r"reordered_bytes=(?P<reordered_bytes>\d+) "
+    r"reorder_drained_packets=(?P<reorder_drained_packets>\d+) "
+    r"reorder_drained_bytes=(?P<reorder_drained_bytes>\d+) "
+    r"reorder_peak_bytes=(?P<reorder_peak_bytes>\d+) "
+    r"duplicate_packets=(?P<duplicate_packets>\d+) "
+    r"reorder_nacks=(?P<reorder_nacks>\d+)"
+)
 
 
 def write_config(
@@ -214,6 +224,9 @@ def parse_summary(log_path: Path) -> dict[str, str]:
             r"([a-zA-Z0-9_]+)=(\d+)", path_matches[-1].group("fields")
         ):
             result[key] = value
+    packet_dlb_matches = list(PACKET_DLB_DETAIL_RE.finditer(text))
+    if packet_dlb_matches:
+        result.update(packet_dlb_matches[-1].groupdict())
     return result
 
 
@@ -437,16 +450,30 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
         )
 
     link_bytes: dict[tuple[int, int], int] = defaultdict(int)
-    for route_rows in routes_by_qp.values():
+    source_nic_bytes: dict[tuple[int, int], int] = defaultdict(int)
+    for qp, route_rows in routes_by_qp.items():
+        source_node = (int(qp[0], 16) >> 8) & 0xFFFF
+        destination_node = (int(qp[1], 16) >> 8) & 0xFFFF
+        is_fabric_qp = (
+            source_node // GPUS_PER_SERVER
+            != destination_node // GPUS_PER_SERVER
+        )
         for row in route_rows:
             link_bytes[(row["sw_id"], row["out_dev"])] += row["bytes"]
+            if row["node_type"] == 0 and is_fabric_qp:
+                source_nic_bytes[(row["sw_id"], row["out_dev"])] += row["bytes"]
     link_rows = [
         {"sw_id": sw, "out_dev": out, "bytes": bytes_value}
         for (sw, out), bytes_value in sorted(link_bytes.items())
     ]
+    source_nic_rows = [
+        {"gpu_id": gpu, "out_dev": out, "bytes": bytes_value}
+        for (gpu, out), bytes_value in sorted(source_nic_bytes.items())
+    ]
 
     write_csv(run_dir / "path_dispersion.csv", dispersion_rows)
     write_csv(run_dir / "link_load.csv", link_rows)
+    write_csv(run_dir / "source_nic_load.csv", source_nic_rows)
 
     fabric_dispersion_rows = [row for row in dispersion_rows if row["is_fabric"]]
     spreads = [
@@ -461,6 +488,21 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
     ]
     unique_paths = [float(row["unique_paths"]) for row in fabric_dispersion_rows]
     link_values = [float(row["bytes"]) for row in link_rows]
+    source_ports_by_gpu: dict[int, set[int]] = defaultdict(set)
+    source_port_bytes: dict[int, int] = defaultdict(int)
+    for row in source_nic_rows:
+        if int(row["bytes"]) <= 0:
+            continue
+        source_ports_by_gpu[int(row["gpu_id"])].add(int(row["out_dev"]))
+        source_port_bytes[int(row["out_dev"])] += int(row["bytes"])
+    source_active_port_counts = [
+        len(ports) for ports in source_ports_by_gpu.values()
+    ]
+    source_total_bytes = sum(source_port_bytes.values())
+    source_port_shares = ",".join(
+        f"{port}:{100.0 * bytes_value / source_total_bytes:.2f}%"
+        for port, bytes_value in sorted(source_port_bytes.items())
+    ) if source_total_bytes else ""
     physical_fcts = [float(row["fct_ns"]) for row in fct_rows]
     dynamic_bindings = [
         row
@@ -561,6 +603,19 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
         "flowlet_route_switches": sum(
             int(row["flowlet_switches"]) for row in flowlet_binding_rows
         ),
+        "source_gpu_count": len(source_ports_by_gpu),
+        "source_nic_active_ports_min": min(source_active_port_counts)
+        if source_active_port_counts
+        else None,
+        "source_nic_active_ports_mean": statistics.mean(
+            source_active_port_counts
+        )
+        if source_active_port_counts
+        else None,
+        "source_nic_active_ports_max": max(source_active_port_counts)
+        if source_active_port_counts
+        else None,
+        "source_nic_port_shares": source_port_shares,
         "link_count": len(link_values),
         "link_bytes_mean": link_mean,
         "link_bytes_p95": percentile(link_values, 0.95),
@@ -835,8 +890,8 @@ def write_report(path: Path, rows: Sequence[dict[str, object]]) -> None:
         "Path coverage compares observed paths with the largest local next-hop choice set, capped by spray width.",
         f"Workload: `{rows[0]['workload']}`" if rows else "",
         "",
-        "| Topology | Policy | Status | JCT (us) | vs ECMP | Logical FCT p95 (ns) | Mean unique paths | Path coverage | Avoidable collision | Link max/mean | Link COV | Dynamic bindings | Flowlet decisions | Flowlet switches | Predicted path score p95 (ns) |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Topology | Policy | Status | JCT (us) | vs ECMP | Source NICs/GPU | Source NIC byte share | Logical FCT p95 (ns) | Mean unique paths | Path coverage | Avoidable collision | Link max/mean | Link COV | Dynamic bindings | Flowlet decisions | Flowlet switches | Predicted path score p95 (ns) |",
+        "|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         topology = str(row["topology"])
@@ -854,6 +909,8 @@ def write_report(path: Path, rows: Sequence[dict[str, object]]) -> None:
                     str(row["status"]),
                     format_metric(jct),
                     delta,
+                    format_metric(row.get("source_nic_active_ports_mean")),
+                    str(row.get("source_nic_port_shares") or "n/a"),
                     format_metric(row.get("logical_fct_p95_ns"), 1),
                     format_metric(row.get("mean_unique_paths_per_flow")),
                     format_metric(row.get("mean_path_coverage")),
