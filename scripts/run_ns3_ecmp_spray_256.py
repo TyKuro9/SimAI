@@ -26,6 +26,9 @@ TOPOLOGIES = {
     "ROFT": ROOT / "mytopo" / "ROFT_256g_8gps_p16a0.5_400Gbps_H100",
     "Meta": ROOT / "mytopo" / "Meta_Topo_256g_8gps_400Gbps_A100",
     "RO": ROOT / "mytopo" / "RailOnly_256g_8gps_p16a0.5_400Gbps_H100",
+    "R2R": ROOT
+    / "mytopo"
+    / "Zcube_R2R_m8_a2_b16_h2_256g_8gps_200G100G_H100",
 }
 
 DEFAULT_WORKLOAD = (
