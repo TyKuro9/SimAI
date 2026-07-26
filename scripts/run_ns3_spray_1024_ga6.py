@@ -24,6 +24,10 @@ TOPOLOGIES = {
     / "mytopo"
     / "1024_12p8T"
     / "ROFT_1024g_8gps_p32a0.5_400Gbps_H100_12p8T",
+    "ROFT3": ROOT
+    / "mytopo"
+    / "1024_12p8T"
+    / "ROFT3_1024g_8gps_400Gbps_H100_12p8T",
     "Zcube": ROOT
     / "mytopo"
     / "1024_12p8T"
