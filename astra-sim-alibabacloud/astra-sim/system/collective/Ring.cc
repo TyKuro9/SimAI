@@ -139,7 +139,7 @@ void Ring::process_stream_count() {
   if (remained_packets_per_message > 0) {
     remained_packets_per_message--;
   }
-  if (id == 0) {
+  if (stream != nullptr && stream->owner != nullptr && stream->owner->id == 0) {
   }
   if (remained_packets_per_message == 0 && stream_count > 0) {
     stream_count--;

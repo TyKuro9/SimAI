@@ -225,7 +225,9 @@ void Workload::check_for_sim_end() {
       }
       generator->register_for_finished_stream(this);
       registered_for_finished_streams = true;
+#if !defined(NS3_MTP)
       layers[0]->is_weight_grad_comm_finished_blocking();
+#endif
       return;
     }
     if (generator->streams_finished == generator->streams_injected) {

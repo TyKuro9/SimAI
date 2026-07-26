@@ -43,13 +43,19 @@ Tick Sys::offset = 0;
 uint8_t* Sys::dummy_data = new uint8_t[2];
 std::vector<Sys*> Sys::all_generators;
 
+const char* event_type_name(EventType event);
+
 namespace {
 bool is_safe_final_flush_event(EventType event) {
   return event == EventType::General ||
       event == EventType::Workload_Wait ||
       event == EventType::Wight_Grad_Comm_Finished_After_Delay ||
       event == EventType::Input_Grad_Comm_Finished_After_Delay ||
-      event == EventType::Fwd_Comm_Finished_After_Delay;
+      event == EventType::Fwd_Comm_Finished_After_Delay ||
+      event == EventType::NPU_to_MA ||
+      event == EventType::MA_to_NPU ||
+      event == EventType::Processing_Finished ||
+      event == EventType::CommProcessingFinished;
 }
 
 const char* loop_state_name(Workload::LoopState state) {
@@ -2171,6 +2177,88 @@ static const char* stream_state_name(StreamState state) {
   return "Unknown";
 }
 
+const char* event_type_name(EventType event) {
+  switch (event) {
+    case EventType::NONE:
+      return "NONE";
+    case EventType::RendezvousSend:
+      return "RendezvousSend";
+    case EventType::RendezvousRecv:
+      return "RendezvousRecv";
+    case EventType::CallEvents:
+      return "CallEvents";
+    case EventType::PacketReceived:
+      return "PacketReceived";
+    case EventType::PacketSent:
+      return "PacketSent";
+    case EventType::PacketSentFinshed:
+      return "PacketSentFinshed";
+    case EventType::WaitForVnetTurn:
+      return "WaitForVnetTurn";
+    case EventType::NCCL_General:
+      return "NCCL_General";
+    case EventType::General:
+      return "General";
+    case EventType::TX_DMA:
+      return "TX_DMA";
+    case EventType::RX_DMA:
+      return "RX_DMA";
+    case EventType::Wight_Grad_Comm_Finished:
+      return "Wight_Grad_Comm_Finished";
+    case EventType::Input_Grad_Comm_Finished:
+      return "Input_Grad_Comm_Finished";
+    case EventType::Fwd_Comm_Finished:
+      return "Fwd_Comm_Finished";
+    case EventType::Wight_Grad_Comm_Finished_After_Delay:
+      return "Wight_Grad_Comm_Finished_After_Delay";
+    case EventType::Input_Grad_Comm_Finished_After_Delay:
+      return "Input_Grad_Comm_Finished_After_Delay";
+    case EventType::Fwd_Comm_Finished_After_Delay:
+      return "Fwd_Comm_Finished_After_Delay";
+    case EventType::Workload_Wait:
+      return "Workload_Wait";
+    case EventType::Reduction_Ready:
+      return "Reduction_Ready";
+    case EventType::Rec_Finished:
+      return "Rec_Finished";
+    case EventType::Send_Finished:
+      return "Send_Finished";
+    case EventType::Processing_Finished:
+      return "Processing_Finished";
+    case EventType::Delivered:
+      return "Delivered";
+    case EventType::NPU_to_MA:
+      return "NPU_to_MA";
+    case EventType::MA_to_NPU:
+      return "MA_to_NPU";
+    case EventType::Read_Port_Free:
+      return "Read_Port_Free";
+    case EventType::Write_Port_Free:
+      return "Write_Port_Free";
+    case EventType::Apply_Boost:
+      return "Apply_Boost";
+    case EventType::Stream_Transfer_Started:
+      return "Stream_Transfer_Started";
+    case EventType::Stream_Ready:
+      return "Stream_Ready";
+    case EventType::Consider_Process:
+      return "Consider_Process";
+    case EventType::Consider_Retire:
+      return "Consider_Retire";
+    case EventType::Consider_Send_Back:
+      return "Consider_Send_Back";
+    case EventType::StreamInit:
+      return "StreamInit";
+    case EventType::StreamsFinishedIncrease:
+      return "StreamsFinishedIncrease";
+    case EventType::CommProcessingFinished:
+      return "CommProcessingFinished";
+    case EventType::NotInitialized:
+      return "NotInitialized";
+  }
+  return "Unknown";
+}
+
 size_t Sys::unfinished_stream_count() {
   size_t count = ready_list.size() + event_queue.size() + pending_sends.size();
   for (const auto& queue_entry : active_Streams) {
@@ -2196,6 +2284,38 @@ void Sys::dump_unfinished_streams(size_t limit) {
             << ", total_running " << total_running_streams
             << ", event_queue " << event_queue.size()
             << ", pending_sends " << pending_sends.size() << std::endl;
+
+  size_t event_ticks_printed = 0;
+  for (const auto& tick_entry : event_queue) {
+    std::cout << "[ASTRA debug] event tick " << tick_entry.first
+              << " entries " << tick_entry.second.size();
+    size_t events_printed = 0;
+    for (const auto& event_entry : tick_entry.second) {
+      EventType event = std::get<1>(event_entry);
+      std::cout << (events_printed == 0 ? " [" : ", ")
+                << event_type_name(event)
+                << (is_safe_final_flush_event(event) ? ":safe" : ":unsafe");
+      events_printed++;
+      if (events_printed >= 8) {
+        if (tick_entry.second.size() > events_printed) {
+          std::cout << ", ...";
+        }
+        break;
+      }
+    }
+    if (!tick_entry.second.empty()) {
+      std::cout << "]";
+    }
+    std::cout << std::endl;
+    event_ticks_printed++;
+    if (event_ticks_printed >= 8) {
+      if (event_queue.size() > event_ticks_printed) {
+        std::cout << "[ASTRA debug] event queue truncated after "
+                  << event_ticks_printed << " ticks" << std::endl;
+      }
+      break;
+    }
+  }
 
   size_t printed = 0;
   for (auto& queue_entry : active_Streams) {

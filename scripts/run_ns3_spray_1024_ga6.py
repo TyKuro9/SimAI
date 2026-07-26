@@ -52,19 +52,20 @@ WORKLOADS = {
     "MoE": ROOT
     / "my_workloads"
     / (
-        "H100-gpt_175B-world_size1024-tp8-pp8-ep8-gbs96-mbs1-"
-        "seq2048-MOE-True-GEMM-True-flash_attn-True.txt"
+        "H100-Mixtral_8x7B-world_size1024-tp8-pp4-ep8-gbs192-mbs1-"
+        "seq2048-MOE-True-GEMM-True-flash_attn-True-GA6.txt"
     ),
 }
 
 EXPECTED_EP = {"Dense": 1, "MoE": 8}
-EXPECTED_PP = {"Dense": 4, "MoE": 8}
+EXPECTED_PP = {"Dense": 4, "MoE": 4}
 POLICIES = [
     "spray_dynamic",
     "spray_flowlet",
     "spray_dual_table",
     "spray_adaptive",
     "spray_dynamic_chunk",
+    "spray_packet_dlb",
 ]
 DEFAULT_OUTPUT = (
     ROOT / "experiments" / "ns3_spray" / "adaptive_1024_dense_ga6_20260717"
@@ -263,13 +264,16 @@ def run_case(
         flowlet_gap_ns=args.flowlet_gap_ns,
         flowlet_bytes=args.flowlet_bytes,
         flowlet_hysteresis_ns=args.flowlet_hysteresis_ns,
+        pxn_policy=args.pxn_policy,
         threads=args.threads,
+        buffer_size_mib=args.buffer_size_mib,
         send_latency=args.send_latency,
         timeout=args.timeout,
         route_dump_interval_ms=2000,
         route_dump_grace_seconds=1,
         jct_only=not record_dp_fct,
         fct_only=record_dp_fct,
+        no_fct_output=False,
         fct_idle_grace_seconds=args.fct_idle_grace_seconds,
         skip_analysis=record_dp_fct,
         extra_env=extra_env,
@@ -396,7 +400,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--flowlet-gap-ns", type=int, default=5000)
     parser.add_argument("--flowlet-bytes", type=int, default=0)
     parser.add_argument("--flowlet-hysteresis-ns", type=int, default=500)
+    parser.add_argument(
+        "--pxn-policy",
+        choices=["off", "force", "fallback", "aggregate"],
+        default="off",
+    )
     parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument("--buffer-size-mib", type=int, default=128)
     parser.add_argument("--parallel-runs", type=int, default=5)
     parser.add_argument("--send-latency", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=259200)
@@ -431,12 +441,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--dynamic-chunks must be between 1 and 64")
     if (
         args.threads < 1
+        or args.buffer_size_mib < 1
         or args.parallel_runs < 1
         or args.timeout < 1
         or args.fct_idle_grace_seconds < 1
     ):
         raise SystemExit(
-            "threads, parallel-runs, timeout, and FCT idle grace must be positive"
+            "threads, buffer-size, parallel-runs, timeout, and FCT idle grace "
+            "must be positive"
         )
     if min(
         args.flowlet_gap_ns,
@@ -498,10 +510,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "flowlet_bytes": args.flowlet_bytes,
         "flowlet_hysteresis_ns": args.flowlet_hysteresis_ns,
         "threads_per_run": args.threads,
+        "buffer_size_mib": args.buffer_size_mib,
         "parallel_runs": args.parallel_runs,
         "send_latency": args.send_latency,
         "timeout_seconds": args.timeout,
-        "pxn": False,
+        "pxn_policy": args.pxn_policy,
         "record_mode": args.record_mode,
         "jct_only": args.record_mode == "jct",
         "completion_log": args.record_mode == "dp-fct",

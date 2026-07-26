@@ -38,6 +38,7 @@
 #include <string>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 #ifdef NS3_MTP
 #include "ns3/mtp-interface.h"
@@ -63,6 +64,29 @@ int ns3_treeflow_tag(
     int api_tag) {
   return flow_tag.tag_id < 0 ? api_tag : flow_tag.tag_id;
 }
+
+#ifdef NS3_MTP
+template <typename Func, typename... Args>
+void ScheduleWithRankContext(
+    int rank,
+    Time delay,
+    Func&& func,
+    Args&&... args) {
+  LogicalProcess* current = MtpInterface::GetSystem();
+  if (current != nullptr && current->GetSystemId() != 0) {
+    LogicalProcess* public_lp = MtpInterface::GetSystem(0);
+    Time target_time = std::max(public_lp->Now(), current->Now()) + delay;
+    MtpInterface::CriticalSection cs;
+    public_lp->ScheduleAt(
+        static_cast<uint32_t>(rank),
+        target_time,
+        MakeEvent(std::forward<Func>(func), std::forward<Args>(args)...));
+    return;
+  }
+  Simulator::ScheduleWithContext(
+      rank, delay, std::forward<Func>(func), std::forward<Args>(args)...);
+}
+#endif
 
 struct sim_event {
   void *buffer;
@@ -125,8 +149,7 @@ public:
     t.msg_handler = fun_ptr;
     t.schTime = delta.time_val;
 #ifdef NS3_MTP
-    Simulator::ScheduleWithContext(
-        rank, NanoSeconds(t.schTime), t.msg_handler, t.fun_arg);
+    ScheduleWithRankContext(rank, NanoSeconds(t.schTime), t.msg_handler, t.fun_arg);
 #else
     Simulator::Schedule(NanoSeconds(t.schTime), t.msg_handler, t.fun_arg);
 #endif
@@ -440,6 +463,7 @@ int main(int argc, char *argv[]) {
   std::atomic<int> maintenance_drained{0};
   std::atomic<int> maintenance_scheduled{0};
   std::atomic<int> maintenance_started{0};
+  std::atomic<int> maintenance_flushed{0};
   std::function<void()> final_drain_pump;
   final_drain_pump = [
                          &systems,
@@ -448,6 +472,8 @@ int main(int argc, char *argv[]) {
                          &maintenance_drained,
                          &maintenance_scheduled,
                          &maintenance_started,
+                         &maintenance_flushed,
+                         &run_in_system_context,
                          &final_drain_pump]() {
     if (simulation_complete()) {
       Simulator::Stop();
@@ -462,19 +488,24 @@ int main(int argc, char *argv[]) {
             static_cast<size_t>(-1),
             static_cast<size_t>(-1),
             static_cast<size_t>(-1));
-    bool network_quiescent = false;
-    std::tuple<size_t, size_t, size_t> reconcile_snapshot;
-    {
-      #ifdef NS3_MTP
-      MtpInterface::explicitCriticalSection cs;
-      #endif
-      network_quiescent = sender_src_port_map.empty() &&
-          receiver_src_port_map.empty() &&
-          waiting_to_notify_receiver.empty();
-      reconcile_snapshot = std::make_tuple(
-          recvHash.size(),
-          expected_receive_count(),
-          receiver_pending_queue.size());
+	    bool network_quiescent = false;
+	    std::tuple<size_t, size_t, size_t> reconcile_snapshot;
+	    std::tuple<size_t, size_t, size_t> active_qp_snapshot;
+	    {
+	      #ifdef NS3_MTP
+	      MtpInterface::explicitCriticalSection cs;
+	      #endif
+	      network_quiescent = sender_src_port_map.empty() &&
+	          receiver_src_port_map.empty() &&
+	          waiting_to_notify_receiver.empty();
+	      active_qp_snapshot = std::make_tuple(
+	          sender_src_port_map.size(),
+	          receiver_src_port_map.size(),
+	          waiting_to_notify_receiver.size());
+	      reconcile_snapshot = std::make_tuple(
+	          recvHash.size(),
+	          expected_receive_count(),
+	          receiver_pending_queue.size());
       #ifdef NS3_MTP
       cs.ExitSection();
       #endif
@@ -488,57 +519,76 @@ int main(int argc, char *argv[]) {
     int drained_streams = maintenance_drained.exchange(0);
     int scheduled_streams = maintenance_scheduled.exchange(0);
     int started_streams = maintenance_started.exchange(0);
-    if (waiting_for_final_streams && network_quiescent &&
-        maintenance_pending.load() == 0) {
-      int action_count = static_cast<int>(std::count_if(
-          systems.begin(), systems.end(), [](const AstraSim::Sys* system) {
-            return system != nullptr;
-          }));
-      maintenance_pending.store(action_count);
+    int flushed_events = maintenance_flushed.exchange(0);
+    if (waiting_for_final_streams) {
       for (auto* system : systems) {
         if (system == nullptr) {
           continue;
         }
-        Simulator::ScheduleWithContext(
-            system->id,
-            NanoSeconds(0),
-            [system,
-             &maintenance_pending,
-             &maintenance_drained,
-             &maintenance_scheduled,
-             &maintenance_started]() {
-              maintenance_drained.fetch_add(
-                  system->drain_finished_streams());
-              maintenance_scheduled.fetch_add(
-                  system->schedule_ready_list_streams());
-              maintenance_started.fetch_add(system->start_ready_streams());
-              maintenance_pending.fetch_sub(1);
-            });
+        run_in_system_context(system, [system,
+                                       &drained_streams,
+                                       &scheduled_streams,
+                                       &started_streams,
+                                       &flushed_events]() {
+          int local_drained = system->drain_finished_streams();
+          int local_scheduled = system->schedule_ready_list_streams();
+          int local_started = system->start_ready_streams();
+          int local_flushed = system->flush_pending_events();
+          drained_streams += local_drained;
+          scheduled_streams += local_scheduled;
+          started_streams += local_started;
+          flushed_events += local_flushed;
+          return local_drained + local_scheduled + local_started +
+              local_flushed;
+        });
       }
     }
-    int progressed_streams =
-        reconciled_receives + drained_streams + scheduled_streams +
-        started_streams;
-    static int stagnant_pumps = 0;
-    if (waiting_for_final_streams && network_quiescent &&
-        progressed_streams == 0) {
-      stagnant_pumps++;
-      if (stagnant_pumps == 1000) {
-        std::cerr << "[NS3] Final drain pending receive snapshot"
+	    int progressed_streams =
+	        reconciled_receives + drained_streams + scheduled_streams +
+	        started_streams + flushed_events;
+	    static int stagnant_pumps = 0;
+	    static int non_quiescent_stagnant_pumps = 0;
+	    static std::tuple<size_t, size_t, size_t> last_active_qp_snapshot =
+	        std::make_tuple(
+	            static_cast<size_t>(-1),
+	            static_cast<size_t>(-1),
+	            static_cast<size_t>(-1));
+	    if (waiting_for_final_streams && network_quiescent &&
+	        progressed_streams == 0) {
+	      stagnant_pumps++;
+	      if (stagnant_pumps == 1000) {
+	        std::cerr << "[NS3] Final drain pending receive snapshot"
                   << std::endl;
-        dump_active_qps(12);
-        dump_receive_mismatch(12);
-      }
-    } else {
-      stagnant_pumps = 0;
-    }
+	        dump_active_qps(12);
+	        dump_receive_mismatch(12);
+	      }
+	      non_quiescent_stagnant_pumps = 0;
+	    } else if (waiting_for_final_streams && !network_quiescent &&
+	               progressed_streams == 0) {
+	      non_quiescent_stagnant_pumps++;
+	      if (active_qp_snapshot != last_active_qp_snapshot ||
+	          non_quiescent_stagnant_pumps == 1000 ||
+	          non_quiescent_stagnant_pumps % 10000 == 0) {
+	        last_active_qp_snapshot = active_qp_snapshot;
+	        std::cerr << "[NS3] Final drain active QP snapshot after "
+	                  << non_quiescent_stagnant_pumps
+	                  << " stagnant pumps" << std::endl;
+	        dump_active_qps(12);
+	        dump_receive_mismatch(12);
+	      }
+	      stagnant_pumps = 0;
+	    } else {
+	      stagnant_pumps = 0;
+	      non_quiescent_stagnant_pumps = 0;
+	    }
     if (progressed_streams > 0) {
       std::cout << "[NS3] "
                 << (waiting_for_final_streams ? "Final drain" : "Recovery")
                 << " pump: reconciled " << reconciled_receives
                 << ", drained " << drained_streams
                 << ", scheduled " << scheduled_streams
-                << ", started " << started_streams << std::endl;
+                << ", started " << started_streams
+                << ", flushed " << flushed_events << std::endl;
     }
     if (simulation_complete()) {
       Simulator::Stop();
@@ -569,6 +619,7 @@ int main(int argc, char *argv[]) {
     int drained_streams = 0;
     int scheduled_streams = 0;
     int started_streams = 0;
+    int flushed_events = 0;
     for (auto* system : systems) {
       if (system != nullptr) {
         drained_streams += run_in_system_context(system, [system]() {
@@ -608,11 +659,25 @@ int main(int argc, char *argv[]) {
                 << std::endl;
       Simulator::Run();
     }
+    for (auto* system : systems) {
+      if (system != nullptr) {
+        flushed_events += run_in_system_context(system, [system]() {
+          return system->flush_pending_events();
+        });
+      }
+    }
+    if (flushed_events > 0) {
+      std::cout << "[NS3] Flushed " << flushed_events
+                << " pending ASTRA event batches after simulator event queue "
+                   "became empty"
+                << std::endl;
+      Simulator::Run();
+    }
     if (simulation_complete()) {
       break;
     }
     if (drained_streams == 0 && scheduled_streams == 0 &&
-        started_streams == 0) {
+        started_streams == 0 && flushed_events == 0) {
       std::cerr << "[NS3] Final drain stalled before workload report"
                 << std::endl;
       dump_active_qps(12);

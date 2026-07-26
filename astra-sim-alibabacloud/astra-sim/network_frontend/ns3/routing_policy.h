@@ -19,6 +19,7 @@ enum class Ns3RoutingPolicy {
   SprayDualTable,
   SprayAdaptive,
   SprayDynamicChunk,
+  SprayPacketDlb,
 };
 
 inline std::string NormalizeNs3RoutingValue(const char* value) {
@@ -67,11 +68,16 @@ inline Ns3RoutingPolicy ParseNs3RoutingPolicy(const char* value) {
       normalized == "chunk_spray" || normalized == "chunk_adaptive") {
     return Ns3RoutingPolicy::SprayDynamicChunk;
   }
+  if (normalized == "spray_packet_dlb" ||
+      normalized == "packet_dlb" ||
+      normalized == "packet_spray" || normalized == "dlb_spray") {
+    return Ns3RoutingPolicy::SprayPacketDlb;
+  }
   throw std::invalid_argument(
       "expected ecmp, spray/qp_spray, spray_dynamic/qp_dynamic, or "
       "spray_path/qp_path, spray_flowlet/dynamic_flowlet, or "
       "spray_dual_table/dual_table_flowlet, spray_adaptive/eta_spray, or "
-      "spray_dynamic_chunk/chunk_spray");
+      "spray_dynamic_chunk/chunk_spray, or spray_packet_dlb/packet_dlb");
 }
 
 inline bool IsNs3SprayPolicy(Ns3RoutingPolicy policy) {
@@ -86,6 +92,10 @@ inline bool IsNs3SprayPolicy(Ns3RoutingPolicy policy) {
 
 inline bool IsNs3DynamicChunkPolicy(Ns3RoutingPolicy policy) {
   return policy == Ns3RoutingPolicy::SprayDynamicChunk;
+}
+
+inline bool IsNs3PacketDlbPolicy(Ns3RoutingPolicy policy) {
+  return policy == Ns3RoutingPolicy::SprayPacketDlb;
 }
 
 inline uint32_t ParseNs3SprayWidth(const char* value) {

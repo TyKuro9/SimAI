@@ -85,7 +85,7 @@ KMAX_MAP 6 25000000000 400 50000000000 800 100000000000 1600 200000000000 1200 4
 KMIN_MAP 6 25000000000 100 50000000000 200 100000000000 400 200000000000 300 400000000000 800 1600000000000 600
 PMAX_MAP 6 25000000000 0.2 50000000000 0.2 100000000000 0.2 200000000000 0.8 400000000000 0.2 1600000000000 0.2
 
-BUFFER_SIZE 32
+BUFFER_SIZE {buffer_size_mib}
 """
 
 SUMMARY_RE = re.compile(
@@ -98,7 +98,7 @@ SUMMARY_RE = re.compile(
 )
 
 FLOWLET_SUMMARY_RE = re.compile(
-    r"\[NS3 FLOWLET SUMMARY\] decisions=(?P<flowlet_decisions>\d+) "
+    r"\[NS3 (?:FLOWLET|PACKET DLB) SUMMARY\] decisions=(?P<flowlet_decisions>\d+) "
     r"switches=(?P<flowlet_switches>\d+) "
     r"gap_triggers=(?P<flowlet_gap_triggers>\d+) "
     r"byte_triggers=(?P<flowlet_byte_triggers>\d+) "
@@ -114,7 +114,9 @@ PATH_SUMMARY_RE = re.compile(r"\[NS3 PATH SUMMARY\](?P<fields>[^\r\n]+)")
 
 
 def write_config(
-    run_dir: Path, fct_output_file: Optional[Path] = None
+    run_dir: Path,
+    fct_output_file: Optional[Path] = None,
+    buffer_size_mib: int = 32,
 ) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     for stale_name in (
@@ -144,6 +146,7 @@ def write_config(
             flow_file=flow_file,
             trace_file=trace_file,
             fct_output_file=fct_output_file or run_dir / "fct.txt",
+            buffer_size_mib=buffer_size_mib,
         )
     )
     return config
@@ -465,6 +468,7 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
             "path_aware_qp",
             "dynamic_flowlet",
             "dual_table_flowlet",
+            "packet_dlb",
         }
     ]
     path_aware_bindings = [
@@ -489,6 +493,7 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
             if route.get("routing_mode") in {
                 "dynamic_flowlet",
                 "dual_table_flowlet",
+                "packet_dlb",
             }:
                 flowlet_bindings[(*qp, route["sw_id"])] = route
     flowlet_binding_rows = list(flowlet_bindings.values())
@@ -569,9 +574,12 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
 def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[str, object]:
     jct_only = bool(getattr(args, "jct_only", False))
     fct_only = bool(getattr(args, "fct_only", False))
+    no_fct_output = bool(getattr(args, "no_fct_output", False))
     run_dir = args.output_dir / topology_name / policy
     config = write_config(
-        run_dir, Path("/dev/null") if jct_only else None
+        run_dir,
+        Path("/dev/null") if jct_only or no_fct_output else None,
+        args.buffer_size_mib,
     )
     if jct_only or fct_only:
         (run_dir / "send.txt").symlink_to("/dev/null")
@@ -581,8 +589,8 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
         {
             "AS_SEND_LAT": str(args.send_latency),
             "AS_NVLS_ENABLE": "0",
-            "AS_PXN_ENABLE": "0",
-            "AS_PXN_POLICY": "off",
+            "AS_PXN_ENABLE": "1" if args.pxn_policy != "off" else "0",
+            "AS_PXN_POLICY": args.pxn_policy,
             "AS_NS3_ROUTING_POLICY": policy,
             "AS_NS3_SPRAY_WIDTH": str(args.spray_width),
             "AS_NS3_DYNAMIC_CHUNKS": str(
@@ -592,7 +600,7 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
             "AS_NS3_FLOWLET_BYTES": str(args.flowlet_bytes),
             "AS_NS3_FLOWLET_HYSTERESIS_NS": str(args.flowlet_hysteresis_ns),
             "AS_NS3_COMPLETION_LOG": "0" if jct_only else "1",
-            "AS_FCT_OUTPUT": "0" if jct_only else "1",
+            "AS_FCT_OUTPUT": "0" if jct_only or no_fct_output else "1",
         }
     )
     env.update(getattr(args, "extra_env", {}))
@@ -779,6 +787,7 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
         "configured_flowlet_gap_ns": args.flowlet_gap_ns,
         "configured_flowlet_bytes": args.flowlet_bytes,
         "configured_flowlet_hysteresis_ns": args.flowlet_hysteresis_ns,
+        "pxn_policy": args.pxn_policy,
         "workload": str(args.workload),
         "topology_file": str(TOPOLOGIES[topology_name]),
         "binary": str(args.binary),
@@ -871,6 +880,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=["Zcube", "ROFT"],
     )
     parser.add_argument(
+        "--topology-file",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="override a built-in topology path for this run",
+    )
+    parser.add_argument(
         "--policies",
         nargs="+",
         choices=[
@@ -882,6 +898,7 @@ def build_parser() -> argparse.ArgumentParser:
             "spray_dual_table",
             "spray_adaptive",
             "spray_dynamic_chunk",
+            "spray_packet_dlb",
         ],
         default=[
             "ecmp",
@@ -906,7 +923,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="force reevaluation after this many QP bytes; 0 keeps gap-only flowlets",
     )
     parser.add_argument("--flowlet-hysteresis-ns", type=int, default=500)
+    parser.add_argument(
+        "--pxn-policy",
+        choices=["off", "force", "fallback", "aggregate"],
+        default="off",
+        help="PXN policy passed to NS3; fallback uses PXN only when no direct route exists",
+    )
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--buffer-size-mib", type=int, default=32)
     parser.add_argument("--send-latency", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=7200)
     parser.add_argument("--route-dump-interval-ms", type=int, default=2000)
@@ -928,6 +952,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="save FCT without route/subflow dumps and stop after final JCT",
     )
+    parser.add_argument(
+        "--no-fct-output",
+        action="store_true",
+        help="save route/subflow dumps but disable FCT output to reduce disk usage",
+    )
     return parser
 
 
@@ -936,12 +965,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args.binary = args.binary.resolve()
     args.workload = args.workload.resolve()
     args.output_dir = args.output_dir.resolve()
+    for override in args.topology_file:
+        if "=" not in override:
+            raise SystemExit(f"invalid --topology-file value: {override}")
+        name, path = override.split("=", 1)
+        if name not in TOPOLOGIES:
+            raise SystemExit(
+                f"unknown topology override {name!r}; expected one of "
+                f"{', '.join(sorted(TOPOLOGIES))}"
+            )
+        TOPOLOGIES[name] = Path(path).resolve()
     if not 1 <= args.spray_width <= 16:
         raise SystemExit("--spray-width must be between 1 and 16")
     if not 1 <= args.dynamic_chunks <= 64:
         raise SystemExit("--dynamic-chunks must be between 1 and 64")
     if (
         args.threads < 1
+        or args.buffer_size_mib < 1
         or args.timeout < 1
         or args.send_latency < 0
         or args.flowlet_gap_ns < 0
@@ -951,7 +991,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         or args.route_dump_grace_seconds < 0
         or args.fct_idle_grace_seconds < 1
     ):
-        raise SystemExit("threads/timeout must be positive and latency non-negative")
+        raise SystemExit(
+            "threads/buffer-size/timeout must be positive and latency non-negative"
+        )
+    if args.fct_only and args.no_fct_output:
+        raise SystemExit("--fct-only and --no-fct-output cannot be combined")
     validate_inputs([args.binary, args.workload, *(TOPOLOGIES[name] for name in args.topologies)])
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

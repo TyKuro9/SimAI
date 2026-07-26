@@ -54,6 +54,14 @@ int main() {
   assert(AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::SprayDynamicChunk));
   assert(AstraSim::IsNs3DynamicChunkPolicy(
       Ns3RoutingPolicy::SprayDynamicChunk));
+  assert(
+      AstraSim::ParseNs3RoutingPolicy("spray_packet_dlb") ==
+      Ns3RoutingPolicy::SprayPacketDlb);
+  assert(
+      AstraSim::ParseNs3RoutingPolicy("PACKET_DLB") ==
+      Ns3RoutingPolicy::SprayPacketDlb);
+  assert(AstraSim::IsNs3PacketDlbPolicy(Ns3RoutingPolicy::SprayPacketDlb));
+  assert(!AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::SprayPacketDlb));
   assert(!AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::Ecmp));
 
   assert(AstraSim::ParseNs3SprayWidth(nullptr) == 4);

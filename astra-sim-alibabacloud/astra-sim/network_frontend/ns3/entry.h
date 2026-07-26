@@ -350,6 +350,8 @@ const char* ns3_routing_policy_name(AstraSim::Ns3RoutingPolicy policy) {
       return "spray_adaptive";
     case AstraSim::Ns3RoutingPolicy::SprayDynamicChunk:
       return "spray_dynamic_chunk";
+    case AstraSim::Ns3RoutingPolicy::SprayPacketDlb:
+      return "spray_packet_dlb";
     case AstraSim::Ns3RoutingPolicy::Ecmp:
       return "ecmp";
   }
