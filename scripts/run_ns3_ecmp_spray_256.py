@@ -68,7 +68,7 @@ L2_ACK_INTERVAL 1
 L2_BACK_TO_ZERO 0
 
 HAS_WIN 1
-GLOBAL_T 0
+GLOBAL_T {global_t}
 VAR_WIN 1
 FAST_REACT 1
 U_TARGET 0.95
@@ -130,6 +130,7 @@ def write_config(
     run_dir: Path,
     fct_output_file: Optional[Path] = None,
     buffer_size_mib: int = 32,
+    global_bdp_window: bool = False,
 ) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     for stale_name in (
@@ -138,6 +139,8 @@ def write_config(
         "fct_summary.csv",
         "link_load.csv",
         "path_dispersion.csv",
+        "packet_dlb_paths.csv",
+        "packet_dlb_paths.csv.tmp",
         "route_choices.csv",
         "route_choices.csv.tmp",
         "run.log",
@@ -160,6 +163,7 @@ def write_config(
             trace_file=trace_file,
             fct_output_file=fct_output_file or run_dir / "fct.txt",
             buffer_size_mib=buffer_size_mib,
+            global_t=1 if global_bdp_window else 0,
         )
     )
     return config
@@ -638,6 +642,7 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
         run_dir,
         Path("/dev/null") if jct_only or no_fct_output else None,
         args.buffer_size_mib,
+        args.global_bdp_window,
     )
     if jct_only or fct_only:
         (run_dir / "send.txt").symlink_to("/dev/null")
@@ -651,6 +656,16 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
             "AS_PXN_POLICY": args.pxn_policy,
             "AS_NS3_ROUTING_POLICY": policy,
             "AS_NS3_SPRAY_WIDTH": str(args.spray_width),
+            "AS_NS3_MULTI_QP_COUNT": str(args.multi_qp_count),
+            "AS_NS3_PACKET_DLB_PATH_SAMPLE_WIDTH": str(
+                args.packet_dlb_path_width
+            ),
+            "AS_NS3_PACKET_DLB_BALANCED_THREE_HOP": (
+                "1" if args.packet_dlb_balanced_three_hop else "0"
+            ),
+            "AS_NS3_PACKET_DLB_TWO_FOUR_HOP": (
+                "1" if args.packet_dlb_two_four_hop else "0"
+            ),
             "AS_NS3_DYNAMIC_CHUNKS": str(
                 getattr(args, "dynamic_chunks", 8)
             ),
@@ -659,6 +674,7 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
             "AS_NS3_FLOWLET_HYSTERESIS_NS": str(args.flowlet_hysteresis_ns),
             "AS_NS3_COMPLETION_LOG": "0" if jct_only else "1",
             "AS_FCT_OUTPUT": "0" if jct_only or no_fct_output else "1",
+            "AS_NS3_ROUTING_STATS": "0" if jct_only else "1",
         }
     )
     env.update(getattr(args, "extra_env", {}))
@@ -666,6 +682,7 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
         "AS_NS3_SUBFLOW_OUTPUT_FILE",
         "AS_NS3_ROUTE_CHOICE_FILE",
         "AS_NS3_ROUTE_CHOICE_DUMP_INTERVAL_MS",
+        "AS_NS3_PACKET_DLB_PATH_STATS_FILE",
         "AS_NS3_STRIPE_METRICS_FILE",
     ):
         env.pop(variable, None)
@@ -680,6 +697,9 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
                 "AS_NS3_ROUTE_CHOICE_FILE": str(route_choice_file),
                 "AS_NS3_ROUTE_CHOICE_DUMP_INTERVAL_MS": str(
                     args.route_dump_interval_ms
+                ),
+                "AS_NS3_PACKET_DLB_PATH_STATS_FILE": str(
+                    run_dir / "packet_dlb_paths.csv"
                 ),
             }
         )
@@ -841,6 +861,12 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
         "topology": topology_name,
         "policy": policy,
         "spray_width": args.spray_width,
+        "multi_qp_count": args.multi_qp_count,
+        "packet_dlb_path_width": args.packet_dlb_path_width,
+        "packet_dlb_balanced_three_hop": (
+            args.packet_dlb_balanced_three_hop
+        ),
+        "packet_dlb_two_four_hop": args.packet_dlb_two_four_hop,
         "dynamic_chunks": getattr(args, "dynamic_chunks", 8),
         "configured_flowlet_gap_ns": args.flowlet_gap_ns,
         "configured_flowlet_bytes": args.flowlet_bytes,
@@ -958,7 +984,9 @@ def build_parser() -> argparse.ArgumentParser:
             "spray_dual_table",
             "spray_adaptive",
             "spray_dynamic_chunk",
+            "spray_disjoint_chunk",
             "spray_packet_dlb",
+            "spray_multi_qp_dlb",
         ],
         default=[
             "ecmp",
@@ -970,10 +998,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--spray-width", type=int, default=4)
     parser.add_argument(
+        "--multi-qp-count",
+        type=int,
+        default=4,
+        help=(
+            "fixed source-NIC QPs per logical fabric flow for "
+            "spray_multi_qp_dlb (default: 4)"
+        ),
+    )
+    parser.add_argument(
+        "--packet-dlb-path-width",
+        type=int,
+        default=16,
+        help="candidate paths sampled per source NIC by spray_packet_dlb",
+    )
+    packet_dlb_hop_group = parser.add_mutually_exclusive_group()
+    packet_dlb_hop_group.add_argument(
+        "--packet-dlb-balanced-three-hop",
+        action="store_true",
+        help=(
+            "prefer three-link endpoint-complementary packet-DLB paths, "
+            "falling back to the normal candidate set when none are live"
+        ),
+    )
+    packet_dlb_hop_group.add_argument(
+        "--packet-dlb-two-four-hop",
+        action="store_true",
+        help=(
+            "prefer only two-link or four-link packet-DLB paths, falling "
+            "back to the normal candidate set when neither is live"
+        ),
+    )
+    parser.add_argument(
         "--dynamic-chunks",
         type=int,
         default=8,
-        help="total chunks per logical flow for spray_dynamic_chunk",
+        help=(
+            "total chunks per logical flow for spray_dynamic_chunk and "
+            "spray_disjoint_chunk"
+        ),
     )
     parser.add_argument("--flowlet-gap-ns", type=int, default=5000)
     parser.add_argument(
@@ -991,6 +1054,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--buffer-size-mib", type=int, default=32)
+    parser.add_argument(
+        "--global-bdp-window",
+        action="store_true",
+        help=(
+            "use the topology-wide max BDP/RTT for every QP; on the current "
+            "Zcube topology this forces the window to the 3-hop value"
+        ),
+    )
     parser.add_argument("--send-latency", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=7200)
     parser.add_argument("--route-dump-interval-ms", type=int, default=2000)
@@ -1037,6 +1108,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         TOPOLOGIES[name] = Path(path).resolve()
     if not 1 <= args.spray_width <= 16:
         raise SystemExit("--spray-width must be between 1 and 16")
+    if not 1 <= args.multi_qp_count <= 16:
+        raise SystemExit("--multi-qp-count must be between 1 and 16")
+    if not 1 <= args.packet_dlb_path_width <= 64:
+        raise SystemExit("--packet-dlb-path-width must be between 1 and 64")
     if not 1 <= args.dynamic_chunks <= 64:
         raise SystemExit("--dynamic-chunks must be between 1 and 64")
     if (

@@ -55,6 +55,17 @@ int main() {
   assert(AstraSim::IsNs3DynamicChunkPolicy(
       Ns3RoutingPolicy::SprayDynamicChunk));
   assert(
+      AstraSim::ParseNs3RoutingPolicy("spray_disjoint_chunk") ==
+      Ns3RoutingPolicy::SprayDisjointChunk);
+  assert(
+      AstraSim::ParseNs3RoutingPolicy("ZCUBE_DISJOINT_CHUNK") ==
+      Ns3RoutingPolicy::SprayDisjointChunk);
+  assert(AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::SprayDisjointChunk));
+  assert(AstraSim::IsNs3DynamicChunkPolicy(
+      Ns3RoutingPolicy::SprayDisjointChunk));
+  assert(AstraSim::IsNs3DisjointChunkPolicy(
+      Ns3RoutingPolicy::SprayDisjointChunk));
+  assert(
       AstraSim::ParseNs3RoutingPolicy("spray_packet_dlb") ==
       Ns3RoutingPolicy::SprayPacketDlb);
   assert(
@@ -62,6 +73,15 @@ int main() {
       Ns3RoutingPolicy::SprayPacketDlb);
   assert(AstraSim::IsNs3PacketDlbPolicy(Ns3RoutingPolicy::SprayPacketDlb));
   assert(!AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::SprayPacketDlb));
+  assert(
+      AstraSim::ParseNs3RoutingPolicy("spray_multi_qp_dlb") ==
+      Ns3RoutingPolicy::SprayMultiQpDlb);
+  assert(
+      AstraSim::ParseNs3RoutingPolicy("REALISTIC_PACKET_DLB") ==
+      Ns3RoutingPolicy::SprayMultiQpDlb);
+  assert(
+      AstraSim::IsNs3MultiQpDlbPolicy(Ns3RoutingPolicy::SprayMultiQpDlb));
+  assert(!AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::SprayMultiQpDlb));
   assert(!AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::Ecmp));
 
   assert(AstraSim::ParseNs3SprayWidth(nullptr) == 4);
@@ -72,6 +92,8 @@ int main() {
       (std::vector<uint64_t>{3, 3, 2, 2}));
   assert(AstraSim::ParseNs3DynamicChunkCount(nullptr) == 8);
   assert(AstraSim::ParseNs3DynamicChunkCount("32") == 32);
+  assert(AstraSim::ParseNs3MultiQpCount(nullptr) == 4);
+  assert(AstraSim::ParseNs3MultiQpCount("16") == 16);
 
   return 0;
 }

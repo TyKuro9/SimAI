@@ -196,6 +196,8 @@ struct Ns3DynamicChunkPlan {
   Ns3PhysicalFlowSpec flow;
   std::vector<uint64_t> chunk_bytes;
   size_t concurrency = 1;
+  size_t next_unassigned_chunk = 0;
+  bool work_stealing = false;
   size_t send_finished = 0;
   size_t receive_finished = 0;
 };
@@ -204,6 +206,8 @@ struct Ns3SubflowContext {
   size_t stripe_index = 0;
   size_t stripe_count = 1;
   uint64_t dynamic_plan_id = 0;
+  size_t worker_ordinal = 0;
+  bool dynamic_work_stealing = false;
   bool send_finished = false;
   bool receive_finished = false;
 };
@@ -295,6 +299,25 @@ uint32_t ns3_dynamic_chunk_count() {
   return count;
 }
 
+uint32_t ns3_multi_qp_count() {
+  static uint32_t count = []() {
+    const char* value = std::getenv("AS_NS3_MULTI_QP_COUNT");
+    if (value == nullptr || value[0] == '\0') {
+      value = std::getenv("NS3_MULTI_QP_COUNT");
+    }
+    try {
+      return AstraSim::ParseNs3MultiQpCount(value);
+    } catch (const std::invalid_argument& error) {
+      MockNcclLog::getInstance()->writeLog(
+          NcclLogLevel::ERROR,
+          "Invalid AS_NS3_MULTI_QP_COUNT=%s: %s",
+          value ? value : "", error.what());
+      std::exit(-1);
+    }
+  }();
+  return count;
+}
+
 bool ns3_completion_log_enabled() {
   static bool enabled = []() {
     const char* value = std::getenv("AS_NS3_COMPLETION_LOG");
@@ -350,8 +373,12 @@ const char* ns3_routing_policy_name(AstraSim::Ns3RoutingPolicy policy) {
       return "spray_adaptive";
     case AstraSim::Ns3RoutingPolicy::SprayDynamicChunk:
       return "spray_dynamic_chunk";
+    case AstraSim::Ns3RoutingPolicy::SprayDisjointChunk:
+      return "spray_disjoint_chunk";
     case AstraSim::Ns3RoutingPolicy::SprayPacketDlb:
       return "spray_packet_dlb";
+    case AstraSim::Ns3RoutingPolicy::SprayMultiQpDlb:
+      return "spray_multi_qp_dlb";
     case AstraSim::Ns3RoutingPolicy::Ecmp:
       return "ecmp";
   }
@@ -401,7 +428,9 @@ FILE* ns3_stripe_metrics_output() {
         file,
         "orig_src,orig_dst,physical_src,physical_dst,flow_id,tag_id,"
         "channel_id,sport,dport,bytes,stripe_index,stripe_count,"
-        "dynamic_chunk,source_nic,initial_source_nic,destination_nic,"
+        "dynamic_chunk,worker_ordinal,path_pair_member,"
+        "source_path_parallelism,actual_path_window_bytes,"
+        "actual_path_rtt_ns,source_nic,initial_source_nic,destination_nic,"
         "source_nic_ordinal_hint,source_nic_hint_fallback,"
         "nic_reassignments,path_signature,path_hops,candidate_count,"
         "path_score_ns,path_queue_delay_ns,path_propagation_ns,"
@@ -725,7 +754,8 @@ void ns3_write_stripe_metric(
   const uint64_t fct_ns = (Simulator::Now() - q->startTime).GetTimeStep();
   fprintf(
       output,
-      "%d,%d,%u,%u,%d,%d,%d,%u,%u,%lu,%zu,%zu,%u,%d,%d,%d,%u,%u,%lu,"
+      "%d,%d,%u,%u,%d,%d,%d,%u,%u,%lu,%zu,%zu,%u,%zu,%zu,%u,%u,%lu,"
+      "%d,%d,%d,%u,%u,%lu,"
       "%016lx,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
       log_fields.original_src,
       log_fields.original_dst,
@@ -740,6 +770,11 @@ void ns3_write_stripe_metric(
       subflow.stripe_index,
       subflow.stripe_count,
       subflow.dynamic_plan_id == 0 ? 0U : 1U,
+      subflow.worker_ordinal,
+      subflow.worker_ordinal % 2,
+      q->m_sourcePathParallelism,
+      q->m_actualPathWindowBytes,
+      q->m_actualPathBaseRttNs,
       q->m_selectedNicIdx,
       q->m_initialSelectedNicIdx,
       q->m_selectedDestinationNicIdx,
@@ -1034,6 +1069,7 @@ void ns3_print_routing_summary() {
   std::cout << "[NS3 ROUTING SUMMARY] policy="
             << ns3_routing_policy_name(ns3_routing_policy())
             << " width=" << ns3_spray_width()
+            << " multi_qps=" << ns3_multi_qp_count()
             << " dynamic_chunks=" << ns3_dynamic_chunk_count()
             << " fabric_legs="
             << ns3_routing_fabric_leg_count.load(std::memory_order_relaxed)
@@ -1320,7 +1356,10 @@ void ns3_launch_physical_subflow(
     uint64_t bytes,
     size_t stripe_index,
     size_t stripe_count,
-    uint64_t dynamic_plan_id) {
+    uint64_t dynamic_plan_id,
+    size_t worker_ordinal,
+    uint32_t source_path_parallelism,
+    bool dynamic_work_stealing) {
   MockNcclLog* nccl_log = MockNcclLog::getInstance();
   uint64_t packet_count = bytes == 0 ? 1 : bytes;
   uint32_t port;
@@ -1335,7 +1374,13 @@ void ns3_launch_physical_subflow(
     ns3_register_subflow_context(
         flow_key,
         Ns3SubflowContext{
-            stripe_index, stripe_count, dynamic_plan_id, false, false});
+            stripe_index,
+            stripe_count,
+            dynamic_plan_id,
+            worker_ordinal,
+            dynamic_work_stealing,
+            false,
+            false});
     PxnLegContext pxn_log_context{};
     const bool has_pxn_context = flow.leg_kind != PxnLegKind::None;
     if (has_pxn_context) {
@@ -1423,10 +1468,22 @@ void ns3_launch_physical_subflow(
   if (flow.request.flowTag.nvls_on) {
     client_helper.SetAttribute("NVLS_enable", UintegerValue(1));
   }
-  if (dynamic_plan_id != 0) {
+  if (dynamic_plan_id != 0 ||
+      (flow.leg_kind == PxnLegKind::None &&
+       AstraSim::IsNs3MultiQpDlbPolicy(ns3_routing_policy()))) {
+    const uint32_t source_nic_width =
+        AstraSim::IsNs3MultiQpDlbPolicy(ns3_routing_policy())
+            ? ns3_multi_qp_count()
+            : ns3_spray_width();
     client_helper.SetAttribute(
         "SourceNicOrdinalHint",
-        UintegerValue(stripe_index % ns3_spray_width()));
+        UintegerValue(worker_ordinal % source_nic_width));
+  }
+  if (dynamic_plan_id != 0 &&
+      AstraSim::IsNs3DisjointChunkPolicy(ns3_routing_policy())) {
+    client_helper.SetAttribute(
+        "SourcePathParallelism",
+        UintegerValue(std::max<uint32_t>(1, source_path_parallelism)));
   }
   {
     #ifdef NS3_MTP
@@ -1434,7 +1491,8 @@ void ns3_launch_physical_subflow(
     #endif
     ApplicationContainer app_con = client_helper.Install(n.Get(flow.src));
     app_con.Start(Time(send_lat));
-    if (flow.leg_kind != PxnLegKind::Local) {
+    if (flow.leg_kind != PxnLegKind::Local &&
+        (dynamic_plan_id == 0 || !dynamic_work_stealing)) {
       const auto logical_key = std::make_pair(
           flow.request.flowTag.current_flow_id,
           std::make_pair(flow.original_src, flow.original_dst));
@@ -1447,10 +1505,15 @@ void ns3_launch_physical_subflow(
   }
 }
 
-bool ns3_launch_dynamic_chunk(uint64_t plan_id, size_t stripe_index) {
+bool ns3_launch_dynamic_chunk(
+    uint64_t plan_id,
+    size_t stripe_index,
+    size_t worker_ordinal) {
   Ns3PhysicalFlowSpec flow;
   uint64_t bytes = 0;
   size_t stripe_count = 0;
+  uint32_t source_path_parallelism = 1;
+  bool work_stealing = false;
   {
     std::lock_guard<std::mutex> guard(ns3_dynamic_chunk_mutex);
     auto found = ns3_dynamic_chunk_plans.find(plan_id);
@@ -1462,14 +1525,30 @@ bool ns3_launch_dynamic_chunk(uint64_t plan_id, size_t stripe_index) {
     stripe_count = plan.chunk_bytes.size();
     bytes = plan.chunk_bytes[stripe_index];
     flow = plan.flow;
+    work_stealing = plan.work_stealing;
+    source_path_parallelism = 0;
+    for (size_t worker = worker_ordinal % 2;
+         worker < plan.concurrency;
+         worker += 2) {
+      ++source_path_parallelism;
+    }
   }
   ns3_launch_physical_subflow(
-      flow, bytes, stripe_index, stripe_count, plan_id);
+      flow,
+      bytes,
+      stripe_index,
+      stripe_count,
+      plan_id,
+      worker_ordinal,
+      source_path_parallelism,
+      work_stealing);
   return true;
 }
 
 void ns3_dynamic_chunk_send_finished(
-    uint64_t plan_id, size_t finished_stripe_index) {
+    uint64_t plan_id,
+    size_t finished_stripe_index,
+    size_t worker_ordinal) {
   if (plan_id == 0) {
     return;
   }
@@ -1483,33 +1562,49 @@ void ns3_dynamic_chunk_send_finished(
     }
     Ns3DynamicChunkPlan& plan = found->second;
     ++plan.send_finished;
-    next_stripe_index = finished_stripe_index + plan.concurrency;
-    launch_next = next_stripe_index < plan.chunk_bytes.size();
-    if (!launch_next && plan.send_finished == plan.chunk_bytes.size() &&
+    if (!plan.work_stealing) {
+      next_stripe_index = finished_stripe_index + plan.concurrency;
+      launch_next = next_stripe_index < plan.chunk_bytes.size();
+    }
+    if (!launch_next &&
+        plan.send_finished == plan.chunk_bytes.size() &&
         plan.receive_finished == plan.chunk_bytes.size()) {
       ns3_dynamic_chunk_plans.erase(found);
       return;
     }
   }
   if (launch_next) {
-    ns3_launch_dynamic_chunk(plan_id, next_stripe_index);
+    ns3_launch_dynamic_chunk(plan_id, next_stripe_index, worker_ordinal);
   }
 }
 
-void ns3_dynamic_chunk_receive_finished(uint64_t plan_id) {
+void ns3_dynamic_chunk_receive_finished(
+    uint64_t plan_id, size_t worker_ordinal) {
   if (plan_id == 0) {
     return;
   }
-  std::lock_guard<std::mutex> guard(ns3_dynamic_chunk_mutex);
-  auto found = ns3_dynamic_chunk_plans.find(plan_id);
-  if (found == ns3_dynamic_chunk_plans.end()) {
-    return;
+  bool launch_next = false;
+  size_t next_stripe_index = 0;
+  {
+    std::lock_guard<std::mutex> guard(ns3_dynamic_chunk_mutex);
+    auto found = ns3_dynamic_chunk_plans.find(plan_id);
+    if (found == ns3_dynamic_chunk_plans.end()) {
+      return;
+    }
+    Ns3DynamicChunkPlan& plan = found->second;
+    ++plan.receive_finished;
+    launch_next = plan.work_stealing &&
+                  plan.next_unassigned_chunk < plan.chunk_bytes.size();
+    if (launch_next) {
+      next_stripe_index = plan.next_unassigned_chunk++;
+    } else if (plan.send_finished == plan.chunk_bytes.size() &&
+               plan.receive_finished == plan.chunk_bytes.size()) {
+      ns3_dynamic_chunk_plans.erase(found);
+      return;
+    }
   }
-  Ns3DynamicChunkPlan& plan = found->second;
-  ++plan.receive_finished;
-  if (plan.send_finished == plan.chunk_bytes.size() &&
-      plan.receive_finished == plan.chunk_bytes.size()) {
-    ns3_dynamic_chunk_plans.erase(found);
+  if (launch_next) {
+    ns3_launch_dynamic_chunk(plan_id, next_stripe_index, worker_ordinal);
   }
 }
 
@@ -1522,6 +1617,9 @@ void SendFlowPhysical(int src, int dst, uint64_t maxPacketCount,
   const bool dynamic_chunk =
       uses_fabric && leg_kind == PxnLegKind::None &&
       AstraSim::IsNs3DynamicChunkPolicy(ns3_routing_policy());
+  const bool multi_qp_dlb =
+      uses_fabric && leg_kind == PxnLegKind::None &&
+      AstraSim::IsNs3MultiQpDlbPolicy(ns3_routing_policy());
   uint32_t stripe_count = 1;
   if (uses_fabric) {
     ns3_routing_fabric_leg_count.fetch_add(1, std::memory_order_relaxed);
@@ -1529,6 +1627,9 @@ void SendFlowPhysical(int src, int dst, uint64_t maxPacketCount,
     if (dynamic_chunk) {
       stripe_count = AstraSim::EffectiveNs3SprayWidth(
           maxPacketCount, ns3_dynamic_chunk_count());
+    } else if (multi_qp_dlb) {
+      stripe_count = AstraSim::EffectiveNs3SprayWidth(
+          maxPacketCount, ns3_multi_qp_count());
     } else if (AstraSim::IsNs3SprayPolicy(ns3_routing_policy())) {
       stripe_count =
           AstraSim::EffectiveNs3SprayWidth(maxPacketCount, ns3_spray_width());
@@ -1564,24 +1665,49 @@ void SendFlowPhysical(int src, int dst, uint64_t maxPacketCount,
     }
     {
       std::lock_guard<std::mutex> guard(ns3_dynamic_chunk_mutex);
+      const size_t concurrency = std::min<size_t>(
+          stripe_bytes.size(), ns3_spray_width());
       Ns3DynamicChunkPlan plan;
       plan.flow = flow;
       plan.chunk_bytes = stripe_bytes;
-      plan.concurrency = std::min<size_t>(
-          stripe_bytes.size(), ns3_spray_width());
+      plan.concurrency = concurrency;
+      plan.next_unassigned_chunk = concurrency;
+      plan.work_stealing =
+          AstraSim::IsNs3DisjointChunkPolicy(ns3_routing_policy());
       ns3_dynamic_chunk_plans.emplace(plan_id, std::move(plan));
+    }
+    if (flow.leg_kind != PxnLegKind::Local &&
+        AstraSim::IsNs3DisjointChunkPolicy(ns3_routing_policy())) {
+      #ifdef NS3_MTP
+      MtpInterface::explicitCriticalSection cs;
+      #endif
+      const auto logical_key = std::make_pair(
+          flow.request.flowTag.current_flow_id,
+          std::make_pair(flow.original_src, flow.original_dst));
+      waiting_to_sent_callback[logical_key] += stripe_bytes.size();
+      waiting_to_notify_receiver[logical_key] += stripe_bytes.size();
+      #ifdef NS3_MTP
+      cs.ExitSection();
+      #endif
     }
     const size_t concurrency = std::min<size_t>(
         stripe_bytes.size(), ns3_spray_width());
     for (size_t index = 0; index < concurrency; ++index) {
-      ns3_launch_dynamic_chunk(plan_id, index);
+      ns3_launch_dynamic_chunk(plan_id, index, index);
     }
     return;
   }
 
   for (size_t index = 0; index < stripe_bytes.size(); ++index) {
     ns3_launch_physical_subflow(
-        flow, stripe_bytes[index], index, stripe_bytes.size(), 0);
+        flow,
+        stripe_bytes[index],
+        index,
+        stripe_bytes.size(),
+        0,
+        index,
+        1,
+        false);
   }
 }
 
@@ -1781,6 +1907,8 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
   PxnLegContext pxn_ctx;
   bool has_pxn_ctx = false;
   bool receive_finished = false;
+  uint64_t completed_dynamic_plan_id = 0;
+  size_t completed_worker_ordinal = 0;
   {
     #ifdef NS3_MTP
     MtpInterface::explicitCriticalSection cs;
@@ -1829,7 +1957,8 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
           standalone_fct);
     }
     if (has_subflow_context) {
-      ns3_dynamic_chunk_receive_finished(subflow_context.dynamic_plan_id);
+      completed_dynamic_plan_id = subflow_context.dynamic_plan_id;
+      completed_worker_ordinal = subflow_context.worker_ordinal;
       ns3_mark_subflow_receive_finished(flow_key);
     }
     if (has_pxn_ctx && pxn_ctx.kind == PxnLegKind::Local) {
@@ -1869,6 +1998,8 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
     cs.ExitSection();
     #endif
   }
+  ns3_dynamic_chunk_receive_finished(
+      completed_dynamic_plan_id, completed_worker_ordinal);
   if (!receive_finished) {
     return;
   }
@@ -1895,10 +2026,10 @@ void send_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
       Ptr<RdmaDriver> rdma = n.Get(sid)->GetObject<RdmaDriver>();
       rdma->m_rdma->ReleasePathReservationBytes(q);
     }
-    // Register a replacement before decrementing the logical callback count,
-    // so a staged plan cannot notify ASTRA-Sim between chunk waves.
     ns3_dynamic_chunk_send_finished(
-        subflow_context.dynamic_plan_id, subflow_context.stripe_index);
+        subflow_context.dynamic_plan_id,
+        subflow_context.stripe_index,
+        subflow_context.worker_ordinal);
   }
   AstraSim::ncclFlowTag flowTag;
   int notify_src = sid;

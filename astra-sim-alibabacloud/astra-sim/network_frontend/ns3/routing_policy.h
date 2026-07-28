@@ -19,7 +19,9 @@ enum class Ns3RoutingPolicy {
   SprayDualTable,
   SprayAdaptive,
   SprayDynamicChunk,
+  SprayDisjointChunk,
   SprayPacketDlb,
+  SprayMultiQpDlb,
 };
 
 inline std::string NormalizeNs3RoutingValue(const char* value) {
@@ -68,16 +70,31 @@ inline Ns3RoutingPolicy ParseNs3RoutingPolicy(const char* value) {
       normalized == "chunk_spray" || normalized == "chunk_adaptive") {
     return Ns3RoutingPolicy::SprayDynamicChunk;
   }
+  if (normalized == "spray_disjoint_chunk" ||
+      normalized == "disjoint_chunk_spray" ||
+      normalized == "zcube_disjoint_chunk" ||
+      normalized == "spray_dynamic_pair") {
+    return Ns3RoutingPolicy::SprayDisjointChunk;
+  }
   if (normalized == "spray_packet_dlb" ||
       normalized == "packet_dlb" ||
       normalized == "packet_spray" || normalized == "dlb_spray") {
     return Ns3RoutingPolicy::SprayPacketDlb;
   }
+  if (normalized == "spray_multi_qp_dlb" ||
+      normalized == "multi_qp_packet_dlb" ||
+      normalized == "packet_dlb_multi_qp" ||
+      normalized == "realistic_packet_dlb") {
+    return Ns3RoutingPolicy::SprayMultiQpDlb;
+  }
   throw std::invalid_argument(
       "expected ecmp, spray/qp_spray, spray_dynamic/qp_dynamic, or "
       "spray_path/qp_path, spray_flowlet/dynamic_flowlet, or "
       "spray_dual_table/dual_table_flowlet, spray_adaptive/eta_spray, or "
-      "spray_dynamic_chunk/chunk_spray, or spray_packet_dlb/packet_dlb");
+      "spray_dynamic_chunk/chunk_spray, "
+      "spray_disjoint_chunk/zcube_disjoint_chunk, "
+      "spray_packet_dlb/packet_dlb, or "
+      "spray_multi_qp_dlb/multi_qp_packet_dlb");
 }
 
 inline bool IsNs3SprayPolicy(Ns3RoutingPolicy policy) {
@@ -87,15 +104,25 @@ inline bool IsNs3SprayPolicy(Ns3RoutingPolicy policy) {
          policy == Ns3RoutingPolicy::SprayFlowlet ||
          policy == Ns3RoutingPolicy::SprayDualTable ||
          policy == Ns3RoutingPolicy::SprayAdaptive ||
-         policy == Ns3RoutingPolicy::SprayDynamicChunk;
+         policy == Ns3RoutingPolicy::SprayDynamicChunk ||
+         policy == Ns3RoutingPolicy::SprayDisjointChunk;
 }
 
 inline bool IsNs3DynamicChunkPolicy(Ns3RoutingPolicy policy) {
-  return policy == Ns3RoutingPolicy::SprayDynamicChunk;
+  return policy == Ns3RoutingPolicy::SprayDynamicChunk ||
+         policy == Ns3RoutingPolicy::SprayDisjointChunk;
+}
+
+inline bool IsNs3DisjointChunkPolicy(Ns3RoutingPolicy policy) {
+  return policy == Ns3RoutingPolicy::SprayDisjointChunk;
 }
 
 inline bool IsNs3PacketDlbPolicy(Ns3RoutingPolicy policy) {
   return policy == Ns3RoutingPolicy::SprayPacketDlb;
+}
+
+inline bool IsNs3MultiQpDlbPolicy(Ns3RoutingPolicy policy) {
+  return policy == Ns3RoutingPolicy::SprayMultiQpDlb;
 }
 
 inline uint32_t ParseNs3SprayWidth(const char* value) {
@@ -156,6 +183,27 @@ inline uint32_t ParseNs3DynamicChunkCount(const char* value) {
   if (consumed != normalized.size() || parsed < 1 || parsed > 64) {
     throw std::invalid_argument(
         "dynamic chunk count must be an integer from 1 to 64");
+  }
+  return static_cast<uint32_t>(parsed);
+}
+
+inline uint32_t ParseNs3MultiQpCount(const char* value) {
+  const std::string normalized = NormalizeNs3RoutingValue(value);
+  if (normalized.empty()) {
+    return 4;
+  }
+
+  size_t consumed = 0;
+  unsigned long parsed = 0;
+  try {
+    parsed = std::stoul(normalized, &consumed, 10);
+  } catch (const std::exception&) {
+    throw std::invalid_argument(
+        "multi-QP count must be an integer from 1 to 16");
+  }
+  if (consumed != normalized.size() || parsed < 1 || parsed > 16) {
+    throw std::invalid_argument(
+        "multi-QP count must be an integer from 1 to 16");
   }
   return static_cast<uint32_t>(parsed);
 }
