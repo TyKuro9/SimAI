@@ -340,6 +340,7 @@ def generateDeepSeekTopo(
     port=64,
     alpha=0.5,
     psw_port=64,
+    psw_per_rank_override=None,
     gpu_type="H800",
     nv_switch_per_server=1,
     nvlink_bw="3600Gbps",
@@ -365,6 +366,10 @@ def generateDeepSeekTopo(
     rank** 的各台 ASW，全部只连接 **同一组** 共 **port*(1-alpha)** 台 PSW（代码里 upl_ports；
     即 ASW 上联端口数对应的 spine 组大小）。PSW 总数 = gpus_per_server * port*(1-alpha)，
     rank r 对应下标区间 [r*upl_ports, (r+1)*upl_ports)。
+
+    若设置 psw_per_rank_override，则每个 rank 的 PSW 组大小改为该值；这用于保持
+    ASW 上联总带宽不变但减少 spine 数量的变体，例如把 8 台 400G spine 改成
+    2 台 1600G spine。
 
     单 segment 时不建 PSW。GPU–ASW 仅 AddLink，不使用 FullConnectGPUsToASW。
     """
@@ -410,7 +415,14 @@ def generateDeepSeekTopo(
             "存在多个 segment 时需要 PSW，但 port*(1-alpha) < 1，无法为 ASW 分配上联 spine"
         )
     if need_psw:
-        psw_total = g * upl_ports
+        psw_per_rank = (
+            int(psw_per_rank_override)
+            if psw_per_rank_override is not None
+            else upl_ports
+        )
+        if psw_per_rank < 1:
+            raise ValueError("psw_per_rank_override 须 >= 1")
+        psw_total = g * psw_per_rank
         if segment_num > int(psw_port):
             raise ValueError(
                 f"segment_num（={segment_num}）须 <= psw_port（={psw_port}），"
@@ -418,6 +430,7 @@ def generateDeepSeekTopo(
             )
     else:
         psw_total = 0
+        psw_per_rank = 0
 
     filename = (
         f"DeepSeek_{gpu_count}g_{g}gps_p{port}a{alpha}_{nic_bw}_{gpu_type}{name_suffix}"
@@ -437,7 +450,7 @@ def generateDeepSeekTopo(
     )
     if need_psw:
         print(
-            f"  PSW 总数: {psw_total}（= gpus_per_server * port*(1-alpha) = {g}*{upl_ports}）"
+            f"  PSW 总数: {psw_total}（= gpus_per_server * 每 rank PSW 数 = {g}*{psw_per_rank}）"
         )
     else:
         print("  PSW：不需要（仅 1 个 segment），拓扑为 ASW-only underlay")
@@ -472,12 +485,12 @@ def generateDeepSeekTopo(
         topo.AddLink(i, asw_id, nic_bw, latency, str(error_rate))
 
     if need_psw:
-        # 各 segment 相同 rank 的 ASW → 同一组 port*(1-alpha) 台 PSW（rank 对应 spine 块）
+        # 各 segment 相同 rank 的 ASW → 同一组 PSW（rank 对应 spine 块）
         for seg in range(segment_num):
             for rank in range(g):
                 asw_id = GetAswId(seg, rank)
-                base = rank * upl_ports
-                for u in range(upl_ports):
+                base = rank * psw_per_rank
+                for u in range(psw_per_rank):
                     topo.AddLink(
                         asw_id,
                         psw_flat[base + u],

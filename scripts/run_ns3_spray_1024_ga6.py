@@ -44,6 +44,9 @@ TOPOLOGIES = {
     / "mytopo"
     / "1024_12p8T"
     / "AlibabaHPN_1024g_8gps_DualToR_DualPlane_200Gbps_H100",
+    "P2R": ROOT
+    / "mytopo"
+    / "P2R_m8_a4_b32_h2_1024g_8gps_200G100G_H100",
 }
 
 WORKLOADS = {
@@ -69,6 +72,7 @@ POLICIES = [
     "spray_dual_table",
     "spray_adaptive",
     "spray_dynamic_chunk",
+    "spray_disjoint_chunk",
     "spray_packet_dlb",
 ]
 DEFAULT_OUTPUT = (
@@ -441,8 +445,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit(f"missing binary: {args.binary}")
     if not 1 <= args.spray_width <= 16:
         raise SystemExit("--spray-width must be between 1 and 16")
-    if not 1 <= args.dynamic_chunks <= 64:
-        raise SystemExit("--dynamic-chunks must be between 1 and 64")
+    if not 1 <= args.dynamic_chunks <= 256:
+        raise SystemExit("--dynamic-chunks must be between 1 and 256")
     if (
         args.threads < 1
         or args.buffer_size_mib < 1

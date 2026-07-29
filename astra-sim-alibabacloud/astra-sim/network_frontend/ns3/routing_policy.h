@@ -21,6 +21,7 @@ enum class Ns3RoutingPolicy {
   SprayDynamicChunk,
   SprayDisjointChunk,
   SprayPacketDlb,
+  SpraySwitchDlb,
   SprayMultiQpDlb,
 };
 
@@ -81,6 +82,12 @@ inline Ns3RoutingPolicy ParseNs3RoutingPolicy(const char* value) {
       normalized == "packet_spray" || normalized == "dlb_spray") {
     return Ns3RoutingPolicy::SprayPacketDlb;
   }
+  if (normalized == "spray_switch_dlb" ||
+      normalized == "switch_packet_dlb" ||
+      normalized == "hop_by_hop_dlb" ||
+      normalized == "packet_dlb_hop_by_hop") {
+    return Ns3RoutingPolicy::SpraySwitchDlb;
+  }
   if (normalized == "spray_multi_qp_dlb" ||
       normalized == "multi_qp_packet_dlb" ||
       normalized == "packet_dlb_multi_qp" ||
@@ -94,6 +101,7 @@ inline Ns3RoutingPolicy ParseNs3RoutingPolicy(const char* value) {
       "spray_dynamic_chunk/chunk_spray, "
       "spray_disjoint_chunk/zcube_disjoint_chunk, "
       "spray_packet_dlb/packet_dlb, or "
+      "spray_switch_dlb/switch_packet_dlb, or "
       "spray_multi_qp_dlb/multi_qp_packet_dlb");
 }
 
@@ -118,7 +126,12 @@ inline bool IsNs3DisjointChunkPolicy(Ns3RoutingPolicy policy) {
 }
 
 inline bool IsNs3PacketDlbPolicy(Ns3RoutingPolicy policy) {
-  return policy == Ns3RoutingPolicy::SprayPacketDlb;
+  return policy == Ns3RoutingPolicy::SprayPacketDlb ||
+         policy == Ns3RoutingPolicy::SpraySwitchDlb;
+}
+
+inline bool IsNs3SwitchDlbPolicy(Ns3RoutingPolicy policy) {
+  return policy == Ns3RoutingPolicy::SpraySwitchDlb;
 }
 
 inline bool IsNs3MultiQpDlbPolicy(Ns3RoutingPolicy policy) {
@@ -178,11 +191,11 @@ inline uint32_t ParseNs3DynamicChunkCount(const char* value) {
     parsed = std::stoul(normalized, &consumed, 10);
   } catch (const std::exception&) {
     throw std::invalid_argument(
-        "dynamic chunk count must be an integer from 1 to 64");
+        "dynamic chunk count must be an integer from 1 to 256");
   }
-  if (consumed != normalized.size() || parsed < 1 || parsed > 64) {
+  if (consumed != normalized.size() || parsed < 1 || parsed > 256) {
     throw std::invalid_argument(
-        "dynamic chunk count must be an integer from 1 to 64");
+        "dynamic chunk count must be an integer from 1 to 256");
   }
   return static_cast<uint32_t>(parsed);
 }

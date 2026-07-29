@@ -74,6 +74,16 @@ int main() {
   assert(AstraSim::IsNs3PacketDlbPolicy(Ns3RoutingPolicy::SprayPacketDlb));
   assert(!AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::SprayPacketDlb));
   assert(
+      AstraSim::ParseNs3RoutingPolicy("spray_switch_dlb") ==
+      Ns3RoutingPolicy::SpraySwitchDlb);
+  assert(
+      AstraSim::ParseNs3RoutingPolicy("hop_by_hop_dlb") ==
+      Ns3RoutingPolicy::SpraySwitchDlb);
+  assert(AstraSim::IsNs3PacketDlbPolicy(Ns3RoutingPolicy::SpraySwitchDlb));
+  assert(AstraSim::IsNs3SwitchDlbPolicy(Ns3RoutingPolicy::SpraySwitchDlb));
+  assert(!AstraSim::IsNs3SwitchDlbPolicy(Ns3RoutingPolicy::SprayPacketDlb));
+  assert(!AstraSim::IsNs3SprayPolicy(Ns3RoutingPolicy::SpraySwitchDlb));
+  assert(
       AstraSim::ParseNs3RoutingPolicy("spray_multi_qp_dlb") ==
       Ns3RoutingPolicy::SprayMultiQpDlb);
   assert(

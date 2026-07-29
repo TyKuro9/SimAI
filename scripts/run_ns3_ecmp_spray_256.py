@@ -20,15 +20,30 @@ ROOT = Path(__file__).resolve().parents[1]
 GPUS_PER_SERVER = 8
 
 TOPOLOGIES = {
-    "Zcube": ROOT / "mytopo" / "Zcube_n16_k2_256g_8gps_200Gbps_H100",
-    "DeepSeek": ROOT / "mytopo" / "DeepSeek_256g_8gps_p16a0.5_400Gbps_H800",
-    "HPN": ROOT / "mytopo" / "AlibabaHPN_256g_8gps_DualToR_DualPlane_200Gbps_H100",
-    "ROFT": ROOT / "mytopo" / "ROFT_256g_8gps_p16a0.5_400Gbps_H100",
-    "Meta": ROOT / "mytopo" / "Meta_Topo_256g_8gps_400Gbps_A100",
-    "RO": ROOT / "mytopo" / "RailOnly_256g_8gps_p16a0.5_400Gbps_H100",
+    "Zcube": ROOT
+    / "mytopo"
+    / "Zcube_n16_k2_256g_8gps_200Gbps_H100_delay5us_nvlink1us",
+    "DeepSeek": ROOT
+    / "mytopo"
+    / "DeepSeek_256g_8gps_p16a0.5_400Gbps_H800_delay5us_nvlink1us",
+    "HPN": ROOT
+    / "mytopo"
+    / "AlibabaHPN_256g_8gps_DualToR_DualPlane_200Gbps_H100_delay5us_nvlink1us",
+    "ROFT": ROOT
+    / "mytopo"
+    / "ROFT_256g_8gps_p16a0.5_400Gbps_H100_delay5us_nvlink1us",
+    "Meta": ROOT
+    / "mytopo"
+    / "Meta_Topo_256g_8gps_400Gbps_A100_delay5us_nvlink1us",
+    "RO": ROOT
+    / "mytopo"
+    / "RailOnly_256g_8gps_p16a0.5_400Gbps_H100_delay5us_nvlink1us",
     "R2R": ROOT
     / "mytopo"
-    / "Zcube_R2R_m8_a2_b16_h2_256g_8gps_200G100G_H100",
+    / "Zcube_R2R_m8_a2_b16_h2_256g_8gps_200G100G_H100_delay5us_nvlink1us",
+    "P2R": ROOT
+    / "mytopo"
+    / "P2R_m8_a2_b16_h2_256g_8gps_200G100G_H100_delay5us_nvlink1us",
 }
 
 DEFAULT_WORKLOAD = (
@@ -67,7 +82,7 @@ L2_CHUNK_SIZE 4000
 L2_ACK_INTERVAL 1
 L2_BACK_TO_ZERO 0
 
-HAS_WIN 1
+HAS_WIN {has_win}
 GLOBAL_T {global_t}
 VAR_WIN 1
 FAST_REACT 1
@@ -123,6 +138,9 @@ PACKET_DLB_DETAIL_RE = re.compile(
     r"reorder_peak_bytes=(?P<reorder_peak_bytes>\d+) "
     r"duplicate_packets=(?P<duplicate_packets>\d+) "
     r"reorder_nacks=(?P<reorder_nacks>\d+)"
+    r"(?: selective_credit_acks=(?P<selective_credit_acks>\d+) "
+    r"selective_credit_bytes=(?P<selective_credit_bytes>\d+) "
+    r"selective_credit_ooo_acks=(?P<selective_credit_ooo_acks>\d+))?"
 )
 
 
@@ -131,6 +149,7 @@ def write_config(
     fct_output_file: Optional[Path] = None,
     buffer_size_mib: int = 32,
     global_bdp_window: bool = False,
+    has_window: bool = True,
 ) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     for stale_name in (
@@ -164,6 +183,7 @@ def write_config(
             fct_output_file=fct_output_file or run_dir / "fct.txt",
             buffer_size_mib=buffer_size_mib,
             global_t=1 if global_bdp_window else 0,
+            has_win=1 if has_window else 0,
         )
     )
     return config
@@ -518,6 +538,7 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
             "dynamic_flowlet",
             "dual_table_flowlet",
             "packet_dlb",
+            "switch_packet_dlb",
         }
     ]
     path_aware_bindings = [
@@ -543,6 +564,7 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
                 "dynamic_flowlet",
                 "dual_table_flowlet",
                 "packet_dlb",
+                "switch_packet_dlb",
             }:
                 flowlet_bindings[(*qp, route["sw_id"])] = route
     flowlet_binding_rows = list(flowlet_bindings.values())
@@ -643,6 +665,7 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
         Path("/dev/null") if jct_only or no_fct_output else None,
         args.buffer_size_mib,
         args.global_bdp_window,
+        not args.disable_send_window,
     )
     if jct_only or fct_only:
         (run_dir / "send.txt").symlink_to("/dev/null")
@@ -665,6 +688,9 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
             ),
             "AS_NS3_PACKET_DLB_TWO_FOUR_HOP": (
                 "1" if args.packet_dlb_two_four_hop else "0"
+            ),
+            "AS_NS3_PACKET_DLB_SELECTIVE_CREDIT": (
+                "0" if args.disable_packet_dlb_selective_credit else "1"
             ),
             "AS_NS3_DYNAMIC_CHUNKS": str(
                 getattr(args, "dynamic_chunks", 8)
@@ -867,6 +893,10 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
             args.packet_dlb_balanced_three_hop
         ),
         "packet_dlb_two_four_hop": args.packet_dlb_two_four_hop,
+        "packet_dlb_selective_credit": (
+            policy == "spray_switch_dlb"
+            and not args.disable_packet_dlb_selective_credit
+        ),
         "dynamic_chunks": getattr(args, "dynamic_chunks", 8),
         "configured_flowlet_gap_ns": args.flowlet_gap_ns,
         "configured_flowlet_bytes": args.flowlet_bytes,
@@ -877,6 +907,7 @@ def run_one(args: argparse.Namespace, topology_name: str, policy: str) -> dict[s
         "binary": str(args.binary),
         "threads": args.threads,
         "send_latency": args.send_latency,
+        "send_window_enabled": not args.disable_send_window,
         "status": status,
         "return_code": return_code,
         "jct": jct if jct is not None else "missing",
@@ -986,6 +1017,7 @@ def build_parser() -> argparse.ArgumentParser:
             "spray_dynamic_chunk",
             "spray_disjoint_chunk",
             "spray_packet_dlb",
+            "spray_switch_dlb",
             "spray_multi_qp_dlb",
         ],
         default=[
@@ -1030,6 +1062,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--disable-packet-dlb-selective-credit",
+        action="store_true",
+        help=(
+            "use cumulative ACK progress for the switch packet-DLB send "
+            "window; the default returns the matching source-lane credit "
+            "for every uniquely received packet"
+        ),
+    )
+    parser.add_argument(
         "--dynamic-chunks",
         type=int,
         default=8,
@@ -1060,6 +1101,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "use the topology-wide max BDP/RTT for every QP; on the current "
             "Zcube topology this forces the window to the 3-hop value"
+        ),
+    )
+    parser.add_argument(
+        "--disable-send-window",
+        action="store_true",
+        help=(
+            "set HAS_WIN=0 while retaining ACK processing and receiver-side "
+            "completion; intended only for ACK-window ablation"
         ),
     )
     parser.add_argument("--send-latency", type=int, default=3)
@@ -1112,8 +1161,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--multi-qp-count must be between 1 and 16")
     if not 1 <= args.packet_dlb_path_width <= 64:
         raise SystemExit("--packet-dlb-path-width must be between 1 and 64")
-    if not 1 <= args.dynamic_chunks <= 64:
-        raise SystemExit("--dynamic-chunks must be between 1 and 64")
+    if not 1 <= args.dynamic_chunks <= 256:
+        raise SystemExit("--dynamic-chunks must be between 1 and 256")
     if (
         args.threads < 1
         or args.buffer_size_mib < 1

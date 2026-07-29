@@ -198,9 +198,12 @@ struct Ns3DynamicChunkPlan {
   size_t concurrency = 1;
   size_t next_unassigned_chunk = 0;
   bool work_stealing = false;
+  bool dispatch_on_send = false;
   size_t send_finished = 0;
   size_t receive_finished = 0;
 };
+
+constexpr uint64_t kNs3DynamicChunkSendPipelineMaxBytes = 1ULL << 20;
 
 struct Ns3SubflowContext {
   size_t stripe_index = 0;
@@ -377,6 +380,8 @@ const char* ns3_routing_policy_name(AstraSim::Ns3RoutingPolicy policy) {
       return "spray_disjoint_chunk";
     case AstraSim::Ns3RoutingPolicy::SprayPacketDlb:
       return "spray_packet_dlb";
+    case AstraSim::Ns3RoutingPolicy::SpraySwitchDlb:
+      return "spray_switch_dlb";
     case AstraSim::Ns3RoutingPolicy::SprayMultiQpDlb:
       return "spray_multi_qp_dlb";
     case AstraSim::Ns3RoutingPolicy::Ecmp:
@@ -430,7 +435,8 @@ FILE* ns3_stripe_metrics_output() {
         "channel_id,sport,dport,bytes,stripe_index,stripe_count,"
         "dynamic_chunk,worker_ordinal,path_pair_member,"
         "source_path_parallelism,actual_path_window_bytes,"
-        "actual_path_rtt_ns,source_nic,initial_source_nic,destination_nic,"
+        "actual_path_rtt_ns,actual_path_bottleneck_bps,"
+        "source_nic,initial_source_nic,destination_nic,"
         "source_nic_ordinal_hint,source_nic_hint_fallback,"
         "nic_reassignments,path_signature,path_hops,candidate_count,"
         "path_score_ns,path_queue_delay_ns,path_propagation_ns,"
@@ -754,7 +760,7 @@ void ns3_write_stripe_metric(
   const uint64_t fct_ns = (Simulator::Now() - q->startTime).GetTimeStep();
   fprintf(
       output,
-      "%d,%d,%u,%u,%d,%d,%d,%u,%u,%lu,%zu,%zu,%u,%zu,%zu,%u,%u,%lu,"
+      "%d,%d,%u,%u,%d,%d,%d,%u,%u,%lu,%zu,%zu,%u,%zu,%zu,%u,%u,%lu,%lu,"
       "%d,%d,%d,%u,%u,%lu,"
       "%016lx,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
       log_fields.original_src,
@@ -775,6 +781,7 @@ void ns3_write_stripe_metric(
       q->m_sourcePathParallelism,
       q->m_actualPathWindowBytes,
       q->m_actualPathBaseRttNs,
+      q->m_actualPathBottleneckBps,
       q->m_selectedNicIdx,
       q->m_initialSelectedNicIdx,
       q->m_selectedDestinationNicIdx,
@@ -1562,7 +1569,11 @@ void ns3_dynamic_chunk_send_finished(
     }
     Ns3DynamicChunkPlan& plan = found->second;
     ++plan.send_finished;
-    if (!plan.work_stealing) {
+    if (plan.work_stealing && plan.dispatch_on_send &&
+        plan.next_unassigned_chunk < plan.chunk_bytes.size()) {
+      next_stripe_index = plan.next_unassigned_chunk++;
+      launch_next = true;
+    } else if (!plan.work_stealing) {
       next_stripe_index = finished_stripe_index + plan.concurrency;
       launch_next = next_stripe_index < plan.chunk_bytes.size();
     }
@@ -1593,7 +1604,7 @@ void ns3_dynamic_chunk_receive_finished(
     }
     Ns3DynamicChunkPlan& plan = found->second;
     ++plan.receive_finished;
-    launch_next = plan.work_stealing &&
+    launch_next = plan.work_stealing && !plan.dispatch_on_send &&
                   plan.next_unassigned_chunk < plan.chunk_bytes.size();
     if (launch_next) {
       next_stripe_index = plan.next_unassigned_chunk++;
@@ -1674,6 +1685,11 @@ void SendFlowPhysical(int src, int dst, uint64_t maxPacketCount,
       plan.next_unassigned_chunk = concurrency;
       plan.work_stealing =
           AstraSim::IsNs3DisjointChunkPolicy(ns3_routing_policy());
+      plan.dispatch_on_send =
+          plan.work_stealing && !plan.chunk_bytes.empty() &&
+          *std::max_element(
+              plan.chunk_bytes.begin(), plan.chunk_bytes.end()) <=
+              kNs3DynamicChunkSendPipelineMaxBytes;
       ns3_dynamic_chunk_plans.emplace(plan_id, std::move(plan));
     }
     if (flow.leg_kind != PxnLegKind::Local &&
